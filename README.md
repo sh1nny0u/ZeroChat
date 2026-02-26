@@ -8,8 +8,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
-## 已知BUG：
-- 无法后台运行
+> 交流QQ群：618679828
 
 ## 📋 功能概览
     部分内容参考了https://github.com/KouriChat/KouriChat
@@ -257,6 +256,7 @@ flutter run
 ## 📄 许可证
 
 MIT License
+
 
 
 

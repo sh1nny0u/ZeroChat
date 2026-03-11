@@ -49,9 +49,10 @@ class ProactiveMessageScheduler {
       final nextTrigger = config.nextTriggerTime;
       if (nextTrigger != null && nextTrigger.isBefore(now)) {
         debugPrint(
-          'ProactiveMessageScheduler: Cold-start compensation for ${role.name}',
+          'ProactiveMessageScheduler: Cold-start compensation for ${role.name} (scheduled: $nextTrigger)',
         );
-        await _triggerProactiveMessage(role.id);
+        // 使用原计划触发时间作为消息时间戳
+        await _triggerProactiveMessage(role.id, scheduledTime: nextTrigger);
       }
     }
   }
@@ -87,7 +88,7 @@ class ProactiveMessageScheduler {
 
     final delay = nextTrigger.difference(DateTime.now());
     if (delay.isNegative) {
-      _triggerProactiveMessage(roleId);
+      _triggerProactiveMessage(roleId, scheduledTime: nextTrigger);
       return;
     }
 
@@ -96,7 +97,7 @@ class ProactiveMessageScheduler {
     );
 
     _roleTimers[roleId] = Timer(delay, () {
-      _triggerProactiveMessage(roleId);
+      _triggerProactiveMessage(roleId, scheduledTime: nextTrigger);
     });
   }
 
@@ -136,7 +137,7 @@ class ProactiveMessageScheduler {
   }
 
   /// 触发主动消息
-  Future<void> _triggerProactiveMessage(String roleId) async {
+  Future<void> _triggerProactiveMessage(String roleId, {DateTime? scheduledTime}) async {
     final role = RoleService.getRoleById(roleId);
     if (role == null) return;
 
@@ -156,14 +157,25 @@ class ProactiveMessageScheduler {
 
     debugPrint('ProactiveMessageScheduler: Triggering for ${role.name}');
 
+    // 实际消息时间：使用计划触发时间或当前时间
+    final messageTime = scheduledTime ?? DateTime.now();
+
     try {
+      // 获取聊天历史作为上下文（最近10轮对话）
+      final recentMessages = MessageStore.instance.getRecentRounds(roleId, 10);
+      final history = MessageStore.toApiHistory(recentMessages);
+
       final response = await ApiService.sendChatMessageWithRole(
-        message: role.proactiveConfig.triggerPrompt,
+        message: role.proactiveConfig.triggerPrompt.isNotEmpty
+            ? role.proactiveConfig.triggerPrompt
+            : '请你模拟角色，给用户发一条主动消息。要求自然、符合人设。',
         role: role,
+        history: history,
+        coreMemory: role.coreMemory,
       );
 
       if (response.success && response.content != null) {
-        await _sendAsRoleMessage(roleId, role, response.content!);
+        await _sendAsRoleMessage(roleId, role, response.content!, messageTime: messageTime);
         debugPrint('ProactiveMessageScheduler: Message sent for ${role.name}');
       }
     } catch (e) {
@@ -190,9 +202,11 @@ class ProactiveMessageScheduler {
   Future<void> _sendAsRoleMessage(
     String chatId,
     Role role,
-    String content,
-  ) async {
+    String content, {
+    DateTime? messageTime,
+  }) async {
     final segments = SegmentSender.splitMessage(content);
+    final baseTime = messageTime ?? DateTime.now();
 
     for (var i = 0; i < segments.length; i++) {
       final segment = segments[i];
@@ -203,12 +217,15 @@ class ProactiveMessageScheduler {
         );
       }
 
+      // 使用基准时间 + 偏移，保证消息顺序正确
+      final msgTime = baseTime.add(Duration(seconds: i));
+
       final message = Message(
-        id: '${DateTime.now().millisecondsSinceEpoch}_proactive_$i',
+        id: '${baseTime.millisecondsSinceEpoch}_proactive_$i',
         senderId: role.id,
         receiverId: 'me',
         content: segment,
-        timestamp: DateTime.now(),
+        timestamp: msgTime,
       );
 
       await MessageStore.instance.addMessage(chatId, message);

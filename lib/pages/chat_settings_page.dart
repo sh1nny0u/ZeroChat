@@ -1107,19 +1107,25 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
   // ========== 主动消息配置方法 ==========
 
-  void _toggleProactiveMessage(bool enabled) async {
+  Future<void> _toggleProactiveMessage(bool enabled) async {
     _currentRole = _currentRole.copyWith(
       proactiveConfig: _currentRole.proactiveConfig.copyWith(enabled: enabled),
     );
     await RoleService.updateRole(_currentRole);
 
+    // 从 RoleService 重新加载确认保存成功
+    final saved = RoleService.getRoleById(_currentRole.id);
+    if (saved != null) {
+      _currentRole = saved;
+    }
+
     // 通知调度器
     ProactiveMessageScheduler.instance.onRoleConfigChanged(_currentRole.id);
 
-    setState(() {});
+    if (mounted) setState(() {});
   }
 
-  void _editProactivePrompt() async {
+  Future<void> _editProactivePrompt() async {
     final controller = TextEditingController(
       text: _currentRole.proactiveConfig.triggerPrompt,
     );
@@ -1149,18 +1155,25 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       ),
     );
 
-    if (result != null && result.isNotEmpty) {
+    if (result != null) {
       _currentRole = _currentRole.copyWith(
         proactiveConfig: _currentRole.proactiveConfig.copyWith(
           triggerPrompt: result,
         ),
       );
       await RoleService.updateRole(_currentRole);
-      setState(() {});
+
+      // 从 RoleService 重新加载确认保存成功
+      final saved = RoleService.getRoleById(_currentRole.id);
+      if (saved != null) {
+        _currentRole = saved;
+      }
+
+      if (mounted) setState(() {});
     }
   }
 
-  void _editProactiveCountdown() async {
+  Future<void> _editProactiveCountdown() async {
     double min = _currentRole.proactiveConfig.minCountdownHours;
     double max = _currentRole.proactiveConfig.maxCountdownHours;
 
@@ -1233,8 +1246,15 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         ),
       );
       await RoleService.updateRole(_currentRole);
+
+      // 从 RoleService 重新加载确认保存成功
+      final saved = RoleService.getRoleById(_currentRole.id);
+      if (saved != null) {
+        _currentRole = saved;
+      }
+
       ProactiveMessageScheduler.instance.onRoleConfigChanged(_currentRole.id);
-      setState(() {});
+      if (mounted) setState(() {});
     }
   }
 

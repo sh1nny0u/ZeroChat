@@ -54,8 +54,8 @@ void main() async {
   await ProactiveMessageScheduler.instance.init();
   await MomentsScheduler.instance.init();
 
-  // ========== 后端同步 ==========
-  await _syncWithBackend();
+  // ========== 后端同步（异步，不阻塞 UI） ==========
+  _syncWithBackend();
 
   // 设置状态栏样式
   SystemChrome.setSystemUIOverlayStyle(

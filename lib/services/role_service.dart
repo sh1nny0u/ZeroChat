@@ -249,6 +249,13 @@ class RoleService {
         'avatar_url': role.avatarUrl,
         'persona': role.description,
         'core_memory': role.coreMemory,
+        // AI 参数
+        'temperature': role.temperature,
+        'top_p': role.topP,
+        'frequency_penalty': role.frequencyPenalty,
+        'presence_penalty': role.presencePenalty,
+        'max_context_rounds': role.maxContextRounds,
+        'allow_web_search': role.allowWebSearch,
       });
       return response != null;
     } catch (e) {

@@ -20,6 +20,9 @@ async def call_ai(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     temperature: float = 0.7,
+    top_p: float = 1.0,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
     max_tokens: int = 1000
 ) -> Dict[str, Any]:
     """
@@ -29,6 +32,9 @@ async def call_ai(
         messages: 消息列表 [{"role": "system/user/assistant", "content": "..."}]
         model: 模型名称，默认从配置读取
         temperature: 温度参数
+        top_p: Top P 参数
+        frequency_penalty: 频率惩罚
+        presence_penalty: 存在惩罚
         max_tokens: 最大 token 数
     
     Returns:
@@ -54,6 +60,9 @@ async def call_ai(
                     "model": model or default_model,
                     "messages": messages,
                     "temperature": temperature,
+                    "top_p": top_p,
+                    "frequency_penalty": frequency_penalty,
+                    "presence_penalty": presence_penalty,
                     "max_tokens": max_tokens
                 }
             )
@@ -78,7 +87,7 @@ async def generate_with_role(
     以角色身份生成回复
     
     Args:
-        role_data: 角色数据（含 persona, system_prompt 等）
+        role_data: 角色数据（含 persona, system_prompt, temperature 等）
         user_message: 用户消息
         history: 历史消息
         extra_context: 额外上下文（如记忆）
@@ -107,9 +116,17 @@ async def generate_with_role(
         
         messages.append({"role": "system", "content": system_content})
     
-    # 历史消息
+    # 读取角色 AI 参数
+    temperature = role_data.get("temperature", 0.7)
+    top_p = role_data.get("top_p", 1.0)
+    frequency_penalty = role_data.get("frequency_penalty", 0.0)
+    presence_penalty = role_data.get("presence_penalty", 0.0)
+    max_context_rounds = role_data.get("max_context_rounds", 10)
+    
+    # 历史消息（按角色配置的轮数限制）
     if history:
-        for msg in history[-20:]:  # 最近 20 条
+        max_messages = max_context_rounds * 2
+        for msg in history[-max_messages:]:
             messages.append({
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
@@ -118,7 +135,13 @@ async def generate_with_role(
     # 当前消息
     messages.append({"role": "user", "content": user_message})
     
-    return await call_ai(messages)
+    return await call_ai(
+        messages,
+        temperature=temperature,
+        top_p=top_p,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+    )
 
 async def generate_proactive_message(
     role_data: Dict,

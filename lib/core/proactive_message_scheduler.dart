@@ -161,18 +161,29 @@ class ProactiveMessageScheduler {
     final messageTime = scheduledTime ?? DateTime.now();
 
     try {
-      // 获取聊天历史作为上下文（最近10轮对话）
-      final recentMessages = MessageStore.instance.getRecentRounds(roleId, 10);
-      final history = MessageStore.toApiHistory(recentMessages);
+      final triggerPrompt = role.proactiveConfig.triggerPrompt.isNotEmpty
+          ? role.proactiveConfig.triggerPrompt
+          : '请你模拟角色，给用户发一条主动消息。要求自然、符合人设。';
 
-      final response = await ApiService.sendChatMessageWithRole(
-        message: role.proactiveConfig.triggerPrompt.isNotEmpty
-            ? role.proactiveConfig.triggerPrompt
-            : '请你模拟角色，给用户发一条主动消息。要求自然、符合人设。',
-        role: role,
-        history: history,
-        coreMemory: role.coreMemory,
+      // 优先通过后端生成（走后端记忆、参数）
+      var response = await ApiService.callBackendAI(
+        roleId: roleId,
+        eventType: 'proactive',
+        content: triggerPrompt,
       );
+
+      // 后端不可用时回退到前端直连（携带历史和记忆）
+      if (!response.success && response.error?.contains('不可用') == true) {
+        debugPrint('ProactiveMessageScheduler: Backend unavailable, fallback');
+        final recentMessages = MessageStore.instance.getRecentRounds(roleId, 10);
+        final history = MessageStore.toApiHistory(recentMessages);
+        response = await ApiService.sendChatMessageWithRole(
+          message: triggerPrompt,
+          role: role,
+          history: history,
+          coreMemory: role.coreMemory,
+        );
+      }
 
       if (response.success && response.content != null) {
         await _sendAsRoleMessage(roleId, role, response.content!, messageTime: messageTime);

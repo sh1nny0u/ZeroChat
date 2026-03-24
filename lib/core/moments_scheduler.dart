@@ -96,10 +96,21 @@ class MomentsScheduler {
 
     final prompt = _buildPostPrompt(role);
 
-    final response = await ApiService.sendChatMessageWithRole(
-      message: prompt,
-      role: role,
+    // 优先通过后端生成（走后端记忆、参数）
+    var response = await ApiService.callBackendAI(
+      roleId: role.id,
+      eventType: 'moment',
+      content: prompt,
     );
+
+    // 后端不可用时回退到前端直连
+    if (!response.success && response.error?.contains('不可用') == true) {
+      debugPrint('MomentsScheduler: Backend unavailable, fallback to direct API');
+      response = await ApiService.sendChatMessageWithRole(
+        message: prompt,
+        role: role,
+      );
+    }
 
     if (!response.success || response.content == null) {
       debugPrint('MomentsScheduler: Failed to generate moment content');
@@ -223,10 +234,24 @@ class MomentsScheduler {
   Future<void> _performComment(Role role, MomentPost post) async {
     final prompt = _buildCommentPrompt(role, post);
 
-    final response = await ApiService.sendChatMessageWithRole(
-      message: prompt,
-      role: role,
+    // 优先通过后端生成
+    var response = await ApiService.callBackendAI(
+      roleId: role.id,
+      eventType: 'comment',
+      content: prompt,
+      context: {
+        'post_content': post.content,
+        'post_author': post.authorName,
+      },
     );
+
+    // 后端不可用时回退到前端直连
+    if (!response.success && response.error?.contains('不可用') == true) {
+      response = await ApiService.sendChatMessageWithRole(
+        message: prompt,
+        role: role,
+      );
+    }
 
     if (!response.success || response.content == null) {
       debugPrint('MomentsScheduler: Failed to generate comment');
@@ -315,10 +340,25 @@ class MomentsScheduler {
 - 可以用表情或简单语气词
 - 直接输出回复内容，不要任何解释''';
 
-      final response = await ApiService.sendChatMessageWithRole(
-        message: prompt,
-        role: role,
+      // 优先通过后端生成
+      var response = await ApiService.callBackendAI(
+        roleId: role.id,
+        eventType: 'comment',
+        content: prompt,
+        context: {
+          'post_content': post.content,
+          'post_author': post.authorName,
+          'reply_to': userComment.authorName,
+        },
       );
+
+      // 后端不可用时回退到前端直连
+      if (!response.success && response.error?.contains('不可用') == true) {
+        response = await ApiService.sendChatMessageWithRole(
+          message: prompt,
+          role: role,
+        );
+      }
 
       if (!response.success || response.content == null) continue;
 

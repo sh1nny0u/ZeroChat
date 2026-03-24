@@ -734,17 +734,23 @@ class ChatController extends ChangeNotifier {
 
       // 解析情绪标签
       final (cleanedText, emotion) = StickerService.parseEmotionTag(segment);
-      final displayText = cleanedText.isNotEmpty ? cleanedText : segment;
 
-      final aiMessage = Message(
-        id: '${DateTime.now().millisecondsSinceEpoch}_${i}_${segment.hashCode}',
-        senderId: roleId,
-        receiverId: 'me',
-        content: displayText,
-        timestamp: DateTime.now(),
-      );
+      // 如果整段只是一个情绪标签且无文本内容，则跳过文本消息（仅发表情）
+      if (cleanedText.isEmpty && emotion != null) {
+        debugPrint('ChatController: Segment is emotion-only [$emotion], skipping text');
+      } else {
+        final displayText = cleanedText.isNotEmpty ? cleanedText : segment;
 
-      await MessageStore.instance.addMessage(chatId, aiMessage);
+        final aiMessage = Message(
+          id: '${DateTime.now().millisecondsSinceEpoch}_${i}_${segment.hashCode}',
+          senderId: roleId,
+          receiverId: 'me',
+          content: displayText,
+          timestamp: DateTime.now(),
+        );
+
+        await MessageStore.instance.addMessage(chatId, aiMessage);
+      }
 
       // 更新未读并发送通知
       if (!_typingCallbacks.containsKey(chatId)) {

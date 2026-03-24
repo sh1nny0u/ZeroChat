@@ -52,6 +52,14 @@ class RoleCreate(BaseModel):
     # 主动消息配置
     proactive_config: Optional[ProactiveConfig] = None
     
+    # AI 参数
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    max_context_rounds: Optional[int] = None
+    allow_web_search: Optional[bool] = None
+    
     # 扩展元数据
     tags: Optional[List[str]] = []
     metadata: Optional[Dict[str, Any]] = {}
@@ -67,6 +75,13 @@ class RoleUpdate(BaseModel):
     core_memory: Optional[List[str]] = None
     personality: Optional[PersonalityTraits] = None
     proactive_config: Optional[ProactiveConfig] = None
+    # AI 参数
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    max_context_rounds: Optional[int] = None
+    allow_web_search: Optional[bool] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -86,7 +101,7 @@ def get_role_dir(role_id: str) -> Path:
         (role_dir / subdir).mkdir(exist_ok=True)
     
     # 创建情绪表情包子目录
-    emotions = ["happy", "sad", "angry", "surprised", "love", "confused", "tired"]
+    emotions = ["happy", "sad", "angry", "surprised", "love", "confused", "tired", "excited"]
     for emotion in emotions:
         (role_dir / "emojis" / emotion).mkdir(exist_ok=True)
     

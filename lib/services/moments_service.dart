@@ -1,9 +1,12 @@
+import 'backend_http.dart' as http;
+import 'diagnostics_service.dart';
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/moment_post.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
+import 'api_service.dart';
+import 'package:crypto/crypto.dart';
 
 /// 朋友圈服务
 /// 管理朋友圈动态的增删查改
@@ -17,6 +20,21 @@ class MomentsService extends ChangeNotifier {
   static const String _storageKey = 'moments_posts';
 
   List<MomentPost> _posts = [];
+  Future<String> _operation(String payload) async {
+    final key = sha256.convert(utf8.encode(payload)).toString();
+    final values = Map<String, String>.from(StorageService.getJson('pending_moment_operations') ?? {});
+    if (!values.containsKey(key)) {
+      values[key] = ApiService.requestId();
+      await StorageService.setJson('pending_moment_operations', values);
+    }
+    return values[key]!;
+  }
+
+  Future<void> _done(String payload) async {
+    final values = Map<String, String>.from(StorageService.getJson('pending_moment_operations') ?? {});
+    values.remove(sha256.convert(utf8.encode(payload)).toString());
+    await StorageService.setJson('pending_moment_operations', values);
+  }
 
   /// 获取所有动态（按时间倒序）
   List<MomentPost> get posts => List.unmodifiable(_posts);
@@ -28,11 +46,12 @@ class MomentsService extends ChangeNotifier {
   /// 初始化
   static Future<void> init() async {
     await instance._loadPosts();
-    debugPrint('MomentsService: Loaded ${instance._posts.length} posts');
+    DiagnosticsService.event('behavior', 'loaded');
   }
 
   /// 加载动态
   Future<void> _loadPosts() async {
+    _posts = [];
     final jsonList = StorageService.getJsonList(_storageKey);
     if (jsonList != null) {
       _posts = jsonList.map((json) => MomentPost.fromJson(json)).toList();
@@ -59,8 +78,9 @@ class MomentsService extends ChangeNotifier {
         ? MomentType.textWithImages
         : MomentType.text;
 
+    final payload = jsonEncode(['post', content, imageUrls, stickerPath]);
     final post = MomentPost(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: await _operation(payload),
       authorId: 'me',
       authorName: '我',
       content: content,
@@ -70,15 +90,15 @@ class MomentsService extends ChangeNotifier {
       type: type,
     );
 
+    if (!await publishToBackend(post)) throw StateError('动态未发布，请恢复后端连接后手动重试，内容已保留');
+    _posts.removeWhere((p) => p.id == post.id);
     _posts.insert(0, post);
     await _savePosts();
     notifyListeners();
 
     // 自动同步到后端
-    await publishToBackend(post);
-    debugPrint(
-      'MomentsService: Published user post ${post.id} (synced to backend)',
-    );
+    await _done(payload);
+    DiagnosticsService.event('behavior', 'published_user_post');
     return post;
   }
 
@@ -112,19 +132,18 @@ class MomentsService extends ChangeNotifier {
 
     // 自动同步到后端
     await publishToBackend(post);
-    debugPrint(
-      'MomentsService: Published AI post from $roleName (synced to backend)',
-    );
+    DiagnosticsService.event('behavior', 'published_ai_post_from');
     return post;
   }
 
   /// 删除动态
   Future<void> deletePost(String postId) async {
+    if (!await _httpDelete('$_backendUrl/api/moments/$postId')) throw StateError('删除失败，请手动重试');
     _posts.removeWhere((p) => p.id == postId);
     await _savePosts();
     notifyListeners();
 
-    debugPrint('MomentsService: Deleted post $postId');
+    DiagnosticsService.event('behavior', 'deleted_post');
   }
 
   /// 点赞/取消点赞
@@ -134,6 +153,11 @@ class MomentsService extends ChangeNotifier {
 
     final post = _posts[index];
     final isLiking = !post.isLikedByMe;
+    if (isLiking) {
+      if (await _httpPost('$_backendUrl/api/moments/$postId/like?user_id=me&user_name=我', {}) == null) throw StateError('点赞失败，请手动重试');
+    } else {
+      if (!await _httpDelete('$_backendUrl/api/moments/$postId/like/me')) throw StateError('取消点赞失败，请手动重试');
+    }
     if (post.isLikedByMe) {
       _posts[index] = post.removeLike('me');
     } else {
@@ -143,15 +167,6 @@ class MomentsService extends ChangeNotifier {
     await _savePosts();
     notifyListeners();
 
-    // 自动同步到后端
-    if (isLiking) {
-      await _httpPost(
-        '$_backendUrl/api/moments/$postId/like?user_id=me&user_name=我',
-        {},
-      );
-    } else {
-      await _httpDelete('$_backendUrl/api/moments/$postId/like/me');
-    }
   }
 
   /// AI 点赞
@@ -183,8 +198,15 @@ class MomentsService extends ChangeNotifier {
     final index = _posts.indexWhere((p) => p.id == postId);
     if (index == -1) return;
 
+    final payload = jsonEncode(['comment', postId, authorId, content, replyToId]);
+    final id = await _operation(payload);
+    final response = await _httpPost('$_backendUrl/api/moments/$postId/comment', {
+      'id': id, 'author_id': authorId, 'author_name': authorName, 'content': content,
+      'reply_to_id': replyToId, 'reply_to_name': replyToName,
+    });
+    if (response == null) throw StateError('评论未提交，请恢复后端连接后重试，输入已保留');
     final comment = MomentComment(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: id,
       authorId: authorId,
       authorName: authorName,
       content: content,
@@ -194,20 +216,14 @@ class MomentsService extends ChangeNotifier {
     );
 
     final post = _posts[index];
-    _posts[index] = post.addComment(comment);
+    if (!post.comments.any((c) => c.id == id)) _posts[index] = post.addComment(comment);
     // 如果是用户的帖子被评论，或被回复，增加未读
     if (post.authorId == 'me' || replyToId == 'me') {
       _unreadCount++;
     }
     await _savePosts();
 
-    // 自动同步到后端
-    await _httpPost('$_backendUrl/api/moments/$postId/comment', {
-      'author_id': authorId,
-      'author_name': authorName,
-      'content': content,
-      'reply_to': replyToName,
-    });
+    await _done(payload);
 
     notifyListeners();
   }
@@ -244,43 +260,29 @@ class MomentsService extends ChangeNotifier {
         final List<dynamic> momentsJson = response['moments'];
         for (final json in momentsJson) {
           try {
-            // 检查本地是否已存在
-            final existingIndex = _posts.indexWhere((p) => p.id == json['id']);
-            if (existingIndex == -1) {
-              // 转换后端格式到本地格式
-              final post = MomentPost(
-                id: json['id'] ?? '',
-                authorId: json['author_id'] ?? '',
-                authorName: json['author_name'] ?? '',
-                content: json['content'] ?? '',
-                imageUrls: List<String>.from(json['image_urls'] ?? []),
-                createdAt: DateTime.parse(
-                  json['created_at'] ?? DateTime.now().toIso8601String(),
-                ),
-                type: MomentType.text,
-                likedBy:
-                    (json['liked_by'] as List<dynamic>?)
-                        ?.map((l) => l['name']?.toString() ?? '')
-                        .toList() ??
-                    [],
-              );
-              _posts.add(post);
-            }
+            final normalized = Map<String, dynamic>.from(json as Map);
+            normalized['liked_by'] = (json['liked_by'] as List? ?? []).map((item) => item is Map ? item['id'].toString() : item.toString()).toList();
+            final post = MomentPost.fromJson(normalized);
+            final existingIndex = _posts.indexWhere((p) => p.id == post.id);
+            if (existingIndex == -1) { _posts.add(post); }
+            else { _posts[existingIndex] = post; }
           } catch (e) {
-            debugPrint('MomentsService: Error parsing backend moment: $e');
+            DiagnosticsService.event(
+              'behavior',
+              'error_parsing_backend_moment',
+              error: e,
+            );
           }
         }
         // 按时间倒序
         _posts.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         await _savePosts();
         notifyListeners();
-        debugPrint(
-          'MomentsService: Synced ${momentsJson.length} moments from backend',
-        );
+        DiagnosticsService.event('behavior', 'synced');
         return true;
       }
     } catch (e) {
-      debugPrint('MomentsService: Backend fetch failed: $e');
+      DiagnosticsService.event('behavior', 'backend_fetch_failed', error: e);
     }
     return false;
   }
@@ -289,6 +291,7 @@ class MomentsService extends ChangeNotifier {
   Future<bool> publishToBackend(MomentPost post) async {
     try {
       final response = await _httpPost('$_backendUrl/api/moments', {
+        'id': post.id,
         'author_id': post.authorId,
         'author_name': post.authorName,
         'content': post.content,
@@ -296,7 +299,11 @@ class MomentsService extends ChangeNotifier {
       });
       return response != null;
     } catch (e) {
-      debugPrint('MomentsService: Publish to backend failed: $e');
+      DiagnosticsService.event(
+        'behavior',
+        'publish_to_backend_failed',
+        error: e,
+      );
       return false;
     }
   }
@@ -305,14 +312,13 @@ class MomentsService extends ChangeNotifier {
   Future<Map<String, dynamic>?> _httpGet(String url) async {
     try {
       final uri = Uri.parse(url);
-      final request = await HttpClient().getUrl(uri);
-      final response = await request.close();
+      final response = await http.get(uri);
       if (response.statusCode == 200) {
-        final body = await response.transform(const Utf8Decoder()).join();
+        final body = response.body;
         return jsonDecode(body) as Map<String, dynamic>;
       }
     } catch (e) {
-      debugPrint('HTTP GET error: $e');
+      DiagnosticsService.event('behavior', 'legacy_event', error: e);
     }
     return null;
   }
@@ -324,16 +330,13 @@ class MomentsService extends ChangeNotifier {
   ) async {
     try {
       final uri = Uri.parse(url);
-      final request = await HttpClient().postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(data));
-      final response = await request.close();
+      final response = await http.post(uri, headers: {'Content-Type': 'application/json'}, body: jsonEncode(data));
       if (response.statusCode == 200 || response.statusCode == 201) {
-        final body = await response.transform(const Utf8Decoder()).join();
+        final body = response.body;
         return jsonDecode(body) as Map<String, dynamic>;
       }
     } catch (e) {
-      debugPrint('HTTP POST error: $e');
+      DiagnosticsService.event('behavior', 'legacy_event', error: e);
     }
     return null;
   }
@@ -342,11 +345,10 @@ class MomentsService extends ChangeNotifier {
   Future<bool> _httpDelete(String url) async {
     try {
       final uri = Uri.parse(url);
-      final request = await HttpClient().deleteUrl(uri);
-      final response = await request.close();
+      final response = await http.delete(uri);
       return response.statusCode == 200;
     } catch (e) {
-      debugPrint('HTTP DELETE error: $e');
+      DiagnosticsService.event('behavior', 'legacy_event', error: e);
     }
     return false;
   }

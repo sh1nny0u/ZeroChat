@@ -8,12 +8,15 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
+from services.logging_service import get_logger
+
+logger = get_logger("chat")
 
 router = APIRouter()
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+from services.paths_service import DATA_DIR
 ROLES_DIR = DATA_DIR / "roles"
 
 # ========== 数据模型 ==========
@@ -23,12 +26,16 @@ class AIEventType(str, Enum):
     TASK = "task"              # 定时任务触发
     PROACTIVE = "proactive"    # 主动消息
     MOMENT_POST = "moment"     # 发朋友圈
+    MEMORY = "memory"
     MOMENT_COMMENT = "comment" # 朋友圈评论
 
 class AIEvent(BaseModel):
-    role_id: str
+    request_id: str = Field(min_length=8, max_length=180)
+    role_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
     event_type: AIEventType
     content: Optional[str] = ""
+    quote_id: Optional[str] = Field(default=None, max_length=200)
+    quote_content: Optional[str] = Field(default=None, max_length=1000)
     context: Optional[Dict[str, Any]] = {}
 
 class AIResponse(BaseModel):
@@ -41,10 +48,13 @@ class AIResponse(BaseModel):
 # ========== 辅助函数 ==========
 
 def load_role(role_id: str) -> Optional[Dict]:
+    if not role_id.replace("_", "").replace("-", "").isalnum() or len(role_id) > 128:
+        raise HTTPException(422, "无效角色编号")
     profile_file = ROLES_DIR / role_id / "profile.json"
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            return None if data.get("deleted") else data
     return None
 
 def detect_emotion_and_get_emoji(role_id: str, text: str) -> Optional[str]:
@@ -100,6 +110,11 @@ def detect_emotion_and_get_emoji(role_id: str, text: str) -> Optional[str]:
 
 @router.post("/ai/event", response_model=AIResponse)
 async def handle_ai_event(event: AIEvent):
+    from services.event_service import execute
+    return await execute(event)
+
+
+async def process_ai_event(event: AIEvent):
     """
     AI 行为统一入口
     
@@ -108,8 +123,16 @@ async def handle_ai_event(event: AIEvent):
     role = load_role(event.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
+    from services.behavior_service import context as behavior_context
+    role = {**role, "_behavior_context": behavior_context(event.role_id,
+        (event.context or {}).get("chat_id"), event.event_type.value)}
     
     # 根据事件类型分发
+    if event.event_type == AIEventType.MEMORY:
+        from services.memory_service import trigger_memory_summary
+        result = await trigger_memory_summary(event.role_id, role, force=True)
+        return AIResponse(success=result is not None, action="memory", content=result,
+                          error=None if result is not None else "记忆整理失败，请检查供应商设置")
     if event.event_type == AIEventType.CHAT:
         return await handle_chat(role, event)
     elif event.event_type == AIEventType.PROACTIVE:
@@ -135,11 +158,14 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     
     role_id = event.role_id
     user_message = event.content or ""
+    if event.quote_content:
+        user_message = "引用：" + event.quote_content + "\n" + user_message
     
     # 获取上下文
-    history = get_context_messages(role_id)
-    memory_context = get_memory_context_string(role_id)
-    
+    history = get_context_messages(role_id, limit=role.get("max_context_rounds", 10) * 2)
+    memory_context = get_memory_context_string(role_id, user_message)
+    from services.ai_service import load_config
+    from services.intent_service import apply_intent
     # 联网搜索（如果角色开启了搜索功能）
     search_context = ""
     allow_search = role.get("allow_web_search", True)
@@ -151,6 +177,11 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     
     # 合并额外上下文
     extra_parts = []
+    from routers.moments import load_moments
+    if random.random() < 0.25:
+        posts = [p for p in load_moments()[:10] if p.get("author_id") == "me"]
+        if posts:
+            extra_parts.append("用户最近朋友圈（仅自然相关时提及）：" + posts[0]["content"][:1000])
     if memory_context:
         extra_parts.append(memory_context)
     if search_context:
@@ -173,15 +204,15 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
+    await apply_intent(event, role)
     
     ai_reply = result["content"]
     
     # 更新记忆
     append_short_term(role_id, "user", user_message)
-    append_short_term(role_id, "assistant", ai_reply)
+    from services.tts_service import prepare
+    append_short_term(role_id, "assistant", prepare(ai_reply)[0])
     
-    # 触发记忆总结（静默执行，不影响回复）
-    await trigger_memory_summary(role_id, role)
     
     # 检测情绪并获取表情包
     emoji_url = detect_emotion_and_get_emoji(role_id, ai_reply)
@@ -207,7 +238,7 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
     proactive_config = role.get("proactive_config", {})
     trigger_prompt = proactive_config.get("trigger_prompt", "")
     
-    memory_context = get_memory_context_string(role_id)
+    memory_context = get_memory_context_string(role_id, trigger_prompt)
     
     result = await generate_proactive_message(
         role_data=role,
@@ -219,9 +250,8 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
         return AIResponse(success=False, action="ignore", error=result["error"])
     
     ai_message = result["content"]
-    
-    # 记录到短期记忆
-    append_short_term(role_id, "assistant", ai_message)
+    if ai_message.strip() == "[保持安静]":
+        return AIResponse(success=True, action="ignore", metadata={"reason": "ai_declined"})
     
     return AIResponse(
         success=True,
@@ -241,7 +271,8 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     task_prompt = event.content or ""
     task_context = event.context or {}
     
-    memory_context = get_memory_context_string(role_id)
+    group_chat = task_context.get("chat_id", role_id) != role_id
+    memory_context = get_memory_context_string(role_id, task_prompt, task_context.get("chat_id", role_id))
     
     result = await generate_with_role(
         role_data=role,
@@ -253,7 +284,9 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
         return AIResponse(success=False, action="ignore", error=result["error"])
     
     ai_message = result["content"]
-    append_short_term(role_id, "assistant", ai_message)
+    if not group_chat:
+        from services.tts_service import prepare
+        append_short_term(role_id, "assistant", prepare(ai_message)[0])
     
     return AIResponse(
         success=True,
@@ -275,6 +308,8 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
     
+    if result["content"].strip() == "[保持安静]":
+        return AIResponse(success=True, action="ignore", metadata={"reason": "ai_declined"})
     return AIResponse(
         success=True,
         action="post",
@@ -306,6 +341,9 @@ async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
     
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
+
+    if result["content"].strip() == "[保持安静]":
+        return AIResponse(success=True, action="ignore", metadata={"reason": "ai_declined"})
     
     return AIResponse(
         success=True,
@@ -340,94 +378,99 @@ async def get_ai_status(role_id: str):
 
 # ========== 图片识别 ==========
 
-import httpx
-import base64
-
 class VisionRequest(BaseModel):
-    """图片识别请求"""
-    image_base64: str
+    request_id: str = Field(min_length=8, max_length=128)
+    role_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    chat_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    image_base64: str = Field(max_length=12 * 1024 * 1024)
     mime_type: str = "image/jpeg"
     user_prompt: str = "请描述这张图片的内容"
     system_prompt: str = ""
 
+
 @router.post("/chat/vision")
 async def chat_with_vision(request: VisionRequest):
-    """
-    图片识别聊天
-    
-    使用 OpenAI Vision API 或兼容的 API 进行图片识别
-    """
-    from services import settings_service
-    
-    try:
-        # 获取 AI 配置
-        ai_settings = settings_service.get_ai_config()
-        api_url = ai_settings.get("api_url", "")
-        api_key = ai_settings.get("api_key", "")
-        model = ai_settings.get("model", "gpt-4o")
-        
-        if not api_url or not api_key:
-            raise HTTPException(status_code=400, detail="AI API 未配置")
-        
-        # 构建 vision 请求
-        messages = []
-        
-        # 添加 system prompt
-        if request.system_prompt:
-            messages.append({"role": "system", "content": request.system_prompt})
-        
-        # 添加用户消息（包含图片）
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{request.mime_type};base64,{request.image_base64}"
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": request.user_prompt
-                }
-            ]
-        })
-        
-        # 确保 URL 格式正确
-        if not api_url.endswith("/"):
-            api_url += "/"
-        if not api_url.endswith("v1/"):
-            api_url += "v1/"
-        
-        endpoint = f"{api_url}chat/completions"
-        
-        # 调用 API
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": 1024
-                }
-            )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"AI API 错误: {response.text}"
-            )
-        
-        result = response.json()
-        reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        
-        return {"reply": reply, "success": True}
-        
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="AI 请求超时")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    from services.ai_service import call_ai
+    from services import operation_service
+    from services.settings_service import load_settings
+    if not load_settings().get('vision_enabled', False):
+        raise HTTPException(409, '图片识别未启用，请在 AI 接口设置启用并保存后手动重试')
+    if request.mime_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(422, "不支持的图片格式")
+    key = "vision:" + request.request_id
+    if request.role_id:
+        role = load_role(request.role_id)
+        if not role:
+            raise HTTPException(404, "角色不存在")
+        request.system_prompt = role.get("system_prompt", "")
+        if request.chat_id and request.chat_id != request.role_id:
+            from routers.groups import load
+            group = load(request.chat_id)
+            if request.role_id not in group.member_ids:
+                raise HTTPException(403, "角色不是群聊成员")
+    from services.delivery_service import validate_image, store_image
+    image_data = validate_image(request.image_base64)
+    operation_service.claim(key, request.model_dump())
+    image_url = store_image(request.request_id, image_data, request.mime_type) if request.role_id else None
+    result = await call_ai([
+        {"role": "system", "content": request.system_prompt},
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{request.mime_type};base64,{request.image_base64}"}},
+            {"type": "text", "text": request.user_prompt}]}], max_tokens=1024, purpose="vision")
+    if not result["success"]:
+        operation_service.finish(key, operation_service.failure_state(result["error"]))
+        raise HTTPException(502, result["error"])
+    rows = []
+    if request.role_id:
+        from services.delivery_service import save_image, replies
+        from services.event_service import message, conversation_dir
+        from services import history_service
+        image = message(request.request_id + "_user", "me", image_url)
+        image["type"] = "image"
+        rows = [image, *replies(request.request_id, request.role_id, result["content"])]
+        history_service.append(conversation_dir(request.chat_id or request.role_id, request.role_id), rows)
+    operation_service.finish(key)
+    return {"reply": result["content"], "success": True, "messages": rows}
+
+
+class CompletionRequest(BaseModel):
+    request_id: str = Field(min_length=8, max_length=128)
+    message: str = Field(max_length=100000)
+    system_prompt: str = Field(default="", max_length=100000)
+
+
+@router.post("/ai/completion")
+async def completion(body: CompletionRequest):
+    from services import ai_service, operation_service
+    key = "completion:" + body.request_id
+    operation_service.claim(key, body.model_dump())
+    result = await ai_service.call_ai([{"role": "system", "content": body.system_prompt},
+                                     {"role": "user", "content": body.message}])
+    operation_service.finish(key, "completed" if result["success"] else operation_service.failure_state(result["error"]))
+    return result
+
+
+@router.get("/ai/operations/{kind}/{identity}")
+async def operation_status(kind: str, identity: str, chat_id: str = "", role_id: str = ""):
+    from services.operation_service import status, in_flight
+    from services.event_service import conversation_dir
+    from services import history_service
+    if kind not in ("event", "vision", "completion", "group"):
+        raise HTTPException(422, "无效操作类型")
+    rows = []
+    if chat_id and role_id:
+        if not all(value.replace("_", "").replace("-", "").isalnum() for value in (chat_id, role_id)):
+            raise HTTPException(422, "无效会话编号")
+        directory = conversation_dir(chat_id, role_id)
+        if kind == "group":
+            from routers.groups import directory as group_directory
+            directory = group_directory(chat_id) / "chats"
+        with history_service.database(directory) as db:
+            found = db.execute("SELECT payload FROM messages WHERE id=? OR substr(id,1,?)=? ORDER BY sort_time,id",
+                               (identity + "_user", len(identity + "_assistant"), identity + "_assistant")).fetchall()
+            if kind == "group":
+                found = db.execute("SELECT payload FROM messages WHERE id=? OR substr(id,1,?)=? ORDER BY sort_time,id",
+                                   (identity + "_user", len(identity + "_reply_"), identity + "_reply_")).fetchall()
+            rows = [json.loads(r[0]) for r in found]
+    key = kind + ":" + identity
+    return {"state": status(key), "in_flight": in_flight(key), "messages": rows}

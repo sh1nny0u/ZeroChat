@@ -1,0 +1,15 @@
+# Private runtime state and development protection artifacts.
+/data/
+/config/
+/runtime/
+/venv/
+/.venv/
+/models/
+/backups/
+__pycache__/
+*.py[cod]
+*.sqlite3*
+*.log
+.env
+*.jks
+*.keystore

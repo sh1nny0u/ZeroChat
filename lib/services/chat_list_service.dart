@@ -1,3 +1,4 @@
+import 'diagnostics_service.dart';
 import 'package:flutter/foundation.dart';
 import '../models/chat_info.dart';
 import 'storage_service.dart';
@@ -5,6 +6,23 @@ import 'storage_service.dart';
 /// 聊天列表服务
 /// 管理聊天列表状态、未读消息、置顶等
 class ChatListService extends ChangeNotifier {
+  Future<void> reconcileEntities(List<Map<String,dynamic>> roles, List<Map<String,dynamic>> groups) async {
+    final all = [...roles, ...groups];
+    final ids = all.map((r) => r['id']).toSet();
+    _chatList.removeWhere((c) => !ids.contains(c.id));
+    for (final row in all) {
+      final id = row['id'] as String;
+      final index = _chatList.indexWhere((c) => c.id == id);
+      if (index >= 0) {
+        _chatList[index] = _chatList[index].copyWith(name: row['name'] as String, avatarUrl: row['avatar_url'] as String?);
+      } else {
+        _chatList.add(ChatInfo(id: id, name: row['name'] as String, avatarUrl: row['avatar_url'] as String?,
+          isGroup: row.containsKey('member_ids'), memberIds: (row['member_ids'] as List?)?.cast<String>()));
+      }
+    }
+    await _saveChatList();
+    notifyListeners();
+  }
   static final ChatListService _instance = ChatListService._internal();
   factory ChatListService() => _instance;
   ChatListService._internal();
@@ -30,13 +48,12 @@ class ChatListService extends ChangeNotifier {
   /// 初始化服务
   static Future<void> init() async {
     await _instance._loadChatList();
-    debugPrint(
-      'ChatListService initialized with ${_instance._chatList.length} chats',
-    );
+    DiagnosticsService.event('chat', 'chatlistservice_initialized_with');
   }
 
   /// 加载聊天列表
   Future<void> _loadChatList() async {
+    _chatList.clear();
     final jsonList = StorageService.getJsonList('chat_list');
     if (jsonList != null) {
       _chatList.clear();
@@ -44,7 +61,7 @@ class ChatListService extends ChangeNotifier {
         try {
           _chatList.add(ChatInfo.fromJson(json));
         } catch (e) {
-          debugPrint('Error loading chat: $e');
+          DiagnosticsService.event('chat', 'legacy_event', error: e);
         }
       }
     }
@@ -86,6 +103,7 @@ class ChatListService extends ChangeNotifier {
     String? lastMessage,
     DateTime? lastMessageTime,
     bool incrementUnread = false,
+    int unreadDelta = 0,
   }) {
     final index = _chatList.indexWhere((c) => c.id == chatId);
     if (index == -1) return;
@@ -94,7 +112,7 @@ class ChatListService extends ChangeNotifier {
     _chatList[index] = chat.copyWith(
       lastMessage: lastMessage ?? chat.lastMessage,
       lastMessageTime: lastMessageTime ?? DateTime.now(),
-      unreadCount: incrementUnread ? chat.unreadCount + 1 : chat.unreadCount,
+      unreadCount: chat.unreadCount + unreadDelta + (incrementUnread ? 1 : 0),
     );
     _saveChatList();
     notifyListeners();

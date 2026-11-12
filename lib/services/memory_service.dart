@@ -1,14 +1,20 @@
+import 'backend_http.dart' as http;
+import 'diagnostics_service.dart';
 import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
 import 'role_service.dart';
+import 'entity_sync_service.dart';
+import 'session_service.dart';
 
 /// 记忆服务
 /// 管理短期记忆和核心记忆
 class MemoryService {
+  static Future<void> applySynced(List<String> memory) async {
+    _coreMemory = List.of(memory);
+    await _saveCoreMemory();
+  }
   /// 短期记忆：按会话ID存储的对话历史
   static final Map<String, List<Message>> _shortTermMemory = {};
 
@@ -20,10 +26,10 @@ class MemoryService {
 
   /// 初始化记忆服务
   static Future<void> init() async {
+    _coreMemory = [];
+    _shortTermMemory.clear();
     await _loadCoreMemory();
-    debugPrint(
-      'MemoryService initialized with ${_coreMemory.length} core memories',
-    );
+    DiagnosticsService.event('memory', 'memoryservice_initialized_with');
   }
 
   // ========== 核心记忆持久化 ==========
@@ -107,7 +113,7 @@ class MemoryService {
     if (memory.trim().isNotEmpty && !_coreMemory.contains(memory)) {
       _coreMemory.add(memory);
       await _saveCoreMemory();
-      debugPrint('Added to core memory: $memory');
+      DiagnosticsService.event('memory', 'legacy_event');
       // 同步到后端
       await _syncCoreMemoryToBackend();
     }
@@ -122,6 +128,7 @@ class MemoryService {
   static Future<void> removeFromCoreMemory(String memory) async {
     _coreMemory.remove(memory);
     await _saveCoreMemory();
+    await _syncCoreMemoryToBackend();
   }
 
   /// 清空核心记忆
@@ -186,27 +193,30 @@ class MemoryService {
 
   /// 同步核心记忆到后端
   static Future<void> _syncCoreMemoryToBackend() async {
+    if (SessionService.instance.authenticated) {
+      if (!await EntitySyncService.instance.save('user_memory', 'global', {'core_memory': _coreMemory})) {
+        throw StateError('核心记忆存在冲突，请到数据同步页处理');
+      }
+      return;
+    }
     try {
       final backendUrl = SettingsService.instance.backendUrl;
       final roleId = RoleService.getCurrentRole().id;
       final coreMemoryStr = _coreMemory.join('；');
 
       final uri = Uri.parse('$backendUrl/api/roles/$roleId/memory');
-      final request = await HttpClient().putUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'core_memory': coreMemoryStr}));
-      final response = await request.close();
+      final response = await http.put(uri, headers: {'Content-Type': 'application/json'}, body: jsonEncode({'core_memory': coreMemoryStr}));
       if (response.statusCode == 200) {
-        debugPrint(
-          'MemoryService: Core memory synced to backend for role $roleId',
+        DiagnosticsService.event(
+          'memory',
+          'core_memory_synced_to_backend_for_role',
+          roleId: roleId,
         );
       } else {
-        debugPrint(
-          'MemoryService: Backend sync failed with status ${response.statusCode}',
-        );
+        DiagnosticsService.event('memory', 'backend_sync_failed_with_status');
       }
     } catch (e) {
-      debugPrint('MemoryService: Backend sync error: $e');
+      DiagnosticsService.event('memory', 'backend_sync_error', error: e);
     }
   }
 

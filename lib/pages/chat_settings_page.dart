@@ -1,3 +1,8 @@
+import 'memory_management_page.dart';
+import 'behavior_settings_page.dart';
+import 'tts_settings_page.dart';
+import '../widgets/history_list.dart';
+import '../widgets/resource_image.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -6,14 +11,17 @@ import '../models/message.dart';
 import '../services/role_service.dart';
 import '../services/memory_service.dart';
 import '../services/task_service.dart';
+import '../services/diagnostics_service.dart';
 import '../core/message_store.dart';
 import '../core/proactive_message_scheduler.dart';
 import 'role_settings_page.dart';
 import 'task_manager_page.dart';
+import 'role_api_page.dart';
+import 'role_share_page.dart';
 
 /// 聊天设置页面
 /// ZeroChat 风格的聊天信息页面
-class ChatSettingsPage extends StatefulWidget {
+class ChatSettingsPage extends StatelessWidget {
   final String chatId;
   final String chatName;
   final Role? currentRole;
@@ -30,20 +38,76 @@ class ChatSettingsPage extends StatefulWidget {
   });
 
   @override
-  State<ChatSettingsPage> createState() => _ChatSettingsPageState();
+  Widget build(BuildContext context) => _ChatSettingsContent(
+    key: ValueKey(chatId),
+    chatId: chatId,
+    chatName: chatName,
+    currentRole: currentRole,
+    onRoleChanged: onRoleChanged,
+    onClearHistory: onClearHistory,
+  );
 }
 
-class _ChatSettingsPageState extends State<ChatSettingsPage> {
+class _ChatSettingsContent extends StatefulWidget {
+  final String chatId;
+  final String chatName;
+  final Role? currentRole;
+  final VoidCallback? onRoleChanged;
+  final VoidCallback? onClearHistory;
+  const _ChatSettingsContent({
+    super.key,
+    required this.chatId,
+    required this.chatName,
+    this.currentRole,
+    this.onRoleChanged,
+    this.onClearHistory,
+  });
+  @override
+  State<_ChatSettingsContent> createState() => _ChatSettingsPageState();
+}
+
+class _ChatSettingsPageState extends State<_ChatSettingsContent> {
   late Role _currentRole;
 
   @override
   void initState() {
     super.initState();
-    _currentRole = widget.currentRole ?? RoleService.getCurrentRole();
+    _currentRole =
+        RoleService.getRoleById(widget.chatId) ??
+        Role(id: widget.chatId, name: widget.chatName, systemPrompt: '');
+    DiagnosticsService.event(
+      'settings',
+      'chat_settings_opened',
+      chatId: widget.chatId,
+      roleId: _currentRole.id,
+    );
+  }
+
+  Future<bool> _saveRole(Role role) async {
+    if (!mounted) return false;
+    try {
+      if (role.id != widget.chatId) throw StateError('角色与当前聊天不匹配');
+      await RoleService.updateRole(role);
+      _currentRole = RoleService.getRoleById(role.id) ?? role;
+      return mounted;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+          ).showSnackBar(const SnackBar(content: Text('保存失败或修改冲突，请到设置 → 数据同步与备份查看并重试')));
+      }
+      return false;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    if (RoleService.getRoleById(widget.chatId) == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('聊天信息')),
+        body: const Center(child: Text('角色不存在，请返回角色列表后重试')),
+      );
+    }
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
@@ -66,6 +130,14 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           // 头像和名称
           _buildSection([_buildAvatarItem()]),
+          ListTile(title: const Text('生活与自主适应'), trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BehaviorSettingsPage(roleId: widget.chatId)))),
+          ListTile(leading: const Icon(Icons.record_voice_over_outlined), title: const Text('角色语音设置'),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => TtsSettingsPage(roleId: widget.chatId)))),
+          ListTile(title: const Text('角色聊天 API'), trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => RoleApiPage(roleId: widget.chatId)))),
+          ListTile(title: const Text('分享角色好友码'), trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => RoleSharePage(roleId: widget.chatId)))),
 
           const SizedBox(height: 10),
 
@@ -128,12 +200,12 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           // 核心记忆
           _buildSection([
             _buildItem(
-              title: '核心记忆',
+              title: '记忆管理',
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '${_currentRole.coreMemory.length} 条',
+                    '查看与修正',
                     style: const TextStyle(
                       color: Color(0xFF888888),
                       fontSize: 15,
@@ -348,7 +420,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     if (_currentRole.avatarUrl != null && _currentRole.avatarUrl!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
+        child: ResourceImage(
           _currentRole.avatarUrl!,
           width: 60,
           height: 60,
@@ -437,13 +509,16 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
             Switch(
               value: enabled,
               activeColor: const Color(0xFF07C160),
-              onChanged: (value) {
-                TaskService.setQuietTime(
+              onChanged: (value) async {
+                try { await TaskService.setQuietTime(
                   enabled: value,
                   startHour: start,
                   endHour: end,
                 );
-                setState(() {});
+                if (mounted) setState(() {});
+                } catch (error) {
+                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                }
               },
             ),
           ],
@@ -571,14 +646,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
-                        onPressed: () {
-                          TaskService.setQuietTime(
+                        onPressed: () async {
+                          try { await TaskService.setQuietTime(
                             enabled: true,
                             startHour: startHour,
                             endHour: endHour,
                           );
-                          Navigator.pop(context);
-                          setState(() {});
+                          if (context.mounted) Navigator.pop(context);
+                          if (mounted) setState(() {});
+                          } catch (error) {
+                            if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('$error')));
+                          }
                         },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF07C160),
@@ -631,7 +709,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
-                            '聊天记录 (${currentMessages.length} 条)',
+                            '聊天记录 (${MessageStore.instance.getMessageCount(widget.chatId)} 条)',
                             style: const TextStyle(
                               fontSize: 17,
                               fontWeight: FontWeight.w500,
@@ -666,13 +744,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                 style: TextStyle(color: Color(0xFF888888)),
                               ),
                             )
-                          : ListView.builder(
-                              controller: scrollController,
-                              itemCount: currentMessages.length,
-                              itemBuilder: (context, index) {
-                                final msg = currentMessages[index];
-                                return _buildMessageItem(msg, setModalState);
-                              },
+                          : HistoryList(
+                              chatId: widget.chatId,
+                              itemBuilder: (msg) =>
+                                  _buildMessageItem(msg, setModalState),
                             ),
                     ),
                   ],
@@ -792,201 +867,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   void _showCoreMemory() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
-      ),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            // 使用角色的核心记忆
-            final memories = _currentRole.coreMemory;
-
-            return DraggableScrollableSheet(
-              initialChildSize: 0.6,
-              minChildSize: 0.3,
-              maxChildSize: 0.9,
-              expand: false,
-              builder: (context, scrollController) {
-                return Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '核心记忆 (${memories.length} 条)',
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          Row(
-                            children: [
-                              TextButton.icon(
-                                onPressed: () => _addCoreMemory(setModalState),
-                                icon: const Icon(Icons.add, size: 18),
-                                label: const Text('添加'),
-                              ),
-                              if (memories.isNotEmpty)
-                                TextButton(
-                                  onPressed: () async {
-                                    _currentRole = _currentRole
-                                        .clearCoreMemory();
-                                    await RoleService.updateRole(_currentRole);
-                                    setModalState(() {});
-                                    setState(() {});
-                                  },
-                                  child: const Text(
-                                    '清空',
-                                    style: TextStyle(color: Colors.red),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1),
-                    Expanded(
-                      child: memories.isEmpty
-                          ? const Center(
-                              child: Text(
-                                '暂无核心记忆\n点击"添加"来创建',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Color(0xFF888888)),
-                              ),
-                            )
-                          : ListView.builder(
-                              controller: scrollController,
-                              itemCount: memories.length,
-                              itemBuilder: (context, index) {
-                                return ListTile(
-                                  title: Text(memories[index]),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.edit_outlined,
-                                          color: Color(0xFF888888),
-                                        ),
-                                        onPressed: () => _editCoreMemory(
-                                          index,
-                                          memories[index],
-                                          setModalState,
-                                        ),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.delete_outline,
-                                          color: Colors.red,
-                                        ),
-                                        onPressed: () async {
-                                          _currentRole = _currentRole
-                                              .removeCoreMemory(index);
-                                          await RoleService.updateRole(
-                                            _currentRole,
-                                          );
-                                          setModalState(() {});
-                                          setState(() {});
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  void _addCoreMemory(StateSetter setModalState) async {
-    final controller = TextEditingController();
-
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('添加核心记忆'),
-        content: TextField(
-          controller: controller,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            hintText: '例如：用户喜欢编程',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('添加'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != null && result.isNotEmpty) {
-      _currentRole = _currentRole.addCoreMemory(result);
-      await RoleService.updateRole(_currentRole);
-      setModalState(() {});
-      setState(() {});
-    }
-  }
-
-  void _editCoreMemory(
-    int index,
-    String oldMemory,
-    StateSetter setModalState,
-  ) async {
-    final controller = TextEditingController(text: oldMemory);
-
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('编辑核心记忆'),
-        content: TextField(
-          controller: controller,
-          maxLines: 3,
-          decoration: const InputDecoration(border: OutlineInputBorder()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != null && result.isNotEmpty && result != oldMemory) {
-      // 移除旧的，添加新的
-      var role = _currentRole.removeCoreMemory(index);
-      final newMemory = List<String>.from(role.coreMemory);
-      newMemory.insert(index, result);
-      _currentRole = role.copyWith(coreMemory: newMemory);
-      await RoleService.updateRole(_currentRole);
-      setModalState(() {});
-      setState(() {});
-    }
+    Navigator.push(context, MaterialPageRoute(builder: (_) => MemoryManagementPage(roleId: widget.chatId)));
   }
 
   /// 编辑核心记忆总结轮数（角色独立）
@@ -1048,7 +929,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     if (result != null) {
       // 更新角色的总结轮数（角色独立设置）
       _currentRole = _currentRole.copyWith(summaryEveryNRounds: result);
-      await RoleService.updateRole(_currentRole);
+      if (!await _saveRole(_currentRole)) return;
       setState(() {});
     }
   }
@@ -1069,6 +950,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               await MessageStore.instance.clearMessages(widget.chatId);
               MemoryService.clearShortTermMemory(widget.chatId);
               widget.onClearHistory?.call();
+              if (!context.mounted) return;
               Navigator.pop(context);
               Navigator.pop(context);
             },
@@ -1087,9 +969,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       ),
     );
     if (result != null) {
-      await RoleService.updateRole(result);
+      if (!await _saveRole(result)) return;
       setState(() {
-        _currentRole = result;
+        _currentRole = RoleService.getRoleById(result.id) ?? result;
       });
       widget.onRoleChanged?.call();
     }
@@ -1102,7 +984,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         builder: (context) =>
             TaskManagerPage(roleId: widget.chatId, roleName: _currentRole.name),
       ),
-    ).then((_) => setState(() {})); // 刷新任务数量
+    ).then((_) {
+      if (mounted) setState(() {});
+    }); // 刷新任务数量
   }
 
   // ========== 主动消息配置方法 ==========
@@ -1111,7 +995,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     _currentRole = _currentRole.copyWith(
       proactiveConfig: _currentRole.proactiveConfig.copyWith(enabled: enabled),
     );
-    await RoleService.updateRole(_currentRole);
+    if (!await _saveRole(_currentRole)) return;
 
     // 从 RoleService 重新加载确认保存成功
     final saved = RoleService.getRoleById(_currentRole.id);
@@ -1161,7 +1045,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           triggerPrompt: result,
         ),
       );
-      await RoleService.updateRole(_currentRole);
+      if (!await _saveRole(_currentRole)) return;
 
       // 从 RoleService 重新加载确认保存成功
       final saved = RoleService.getRoleById(_currentRole.id);
@@ -1245,7 +1129,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           maxCountdownHours: result['max'],
         ),
       );
-      await RoleService.updateRole(_currentRole);
+      if (!await _saveRole(_currentRole)) return;
 
       // 从 RoleService 重新加载确认保存成功
       final saved = RoleService.getRoleById(_currentRole.id);
@@ -1265,11 +1149,14 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         type: FileType.custom,
         allowedExtensions: ['json', 'txt'],
       );
-      if (result == null || result.files.single.path == null) return;
+      if (!mounted || result == null || result.files.single.path == null) {
+        return;
+      }
 
       final file = File(result.files.single.path!);
       final content = await file.readAsString();
 
+      if (!mounted) return;
       if (content.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(
@@ -1281,9 +1168,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
       // 更新角色
       final updated = _currentRole.copyWith(attachedJsonContent: content);
-      await RoleService.updateRole(updated);
+      if (!await _saveRole(updated)) return;
       setState(() {
-        _currentRole = updated;
+        _currentRole = RoleService.getRoleById(updated.id) ?? updated;
       });
       widget.onRoleChanged?.call();
 
@@ -1322,9 +1209,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       proactiveConfig: updated.proactiveConfig,
       stickerConfig: updated.stickerConfig,
     );
-    await RoleService.updateRole(cleared);
+    if (!await _saveRole(cleared)) return;
     setState(() {
-      _currentRole = cleared;
+      _currentRole = RoleService.getRoleById(cleared.id) ?? cleared;
     });
     widget.onRoleChanged?.call();
   }

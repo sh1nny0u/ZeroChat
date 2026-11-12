@@ -1,3 +1,4 @@
+import '../widgets/resource_image.dart';
 import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/chat_info.dart';
@@ -5,7 +6,6 @@ import '../services/chat_list_service.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
 import '../core/message_store.dart';
-import '../core/chat_controller.dart';
 import 'chat_detail_page.dart';
 
 /// 聊天列表页面
@@ -23,6 +23,7 @@ class _ChatListPageState extends State<ChatListPage> {
     super.initState();
     ChatListService.instance.addListener(_onChatListChanged);
     MessageStore.instance.addListener(_onChatListChanged);
+    RoleService.changes.addListener(_onChatListChanged);
     _initChatList();
   }
 
@@ -37,6 +38,7 @@ class _ChatListPageState extends State<ChatListPage> {
   void dispose() {
     ChatListService.instance.removeListener(_onChatListChanged);
     MessageStore.instance.removeListener(_onChatListChanged);
+    RoleService.changes.removeListener(_onChatListChanged);
     super.dispose();
   }
 
@@ -63,9 +65,6 @@ class _ChatListPageState extends State<ChatListPage> {
     // 从角色列表初始化聊天
     final roles = RoleService.getAllRoles();
     for (final role in roles) {
-      // 初始化聊天上下文
-      ChatController.instance.initChat(role.id);
-
       // 从 MessageStore 获取最后一条消息
       final lastMessage = MessageStore.instance.getLastMessage(role.id);
 
@@ -224,7 +223,7 @@ class _ChatListPageState extends State<ChatListPage> {
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
+        child: ResourceImage(
           avatarUrl,
           width: 48,
           height: 48,
@@ -285,6 +284,7 @@ class _ChatListPageState extends State<ChatListPage> {
   }
 
   String _formatTime(DateTime time) {
+    time = time.toLocal();
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final messageDate = DateTime(time.year, time.month, time.day);

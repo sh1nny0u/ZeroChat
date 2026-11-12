@@ -1,236 +1,120 @@
 # ZeroChat 🤖💬
 
-> 一款模拟微信界面的 AI 聊天伴侣 Flutter 应用，支持多角色 AI 对话、AI 朋友圈、主动消息、定时任务等丰富功能。
+> 一款采用微信式界面的自托管 AI 聊天伴侣，基于 Flutter 与 FastAPI。支持多角色对话、群聊、朋友圈、主动消息、记忆与语音。
 
-![Flutter](https://img.shields.io/badge/Flutter-02569B?style=flat&logo=flutter&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green)
+![Flutter](https://img.shields.io/badge/Flutter-3.38.4%2B-02569B?logo=flutter)
+![Python](https://img.shields.io/badge/Python-3.11_x64-3776AB?logo=python)
+![Version](https://img.shields.io/badge/Version-2.0.0-07C160)
+![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
----
-> 交流QQ群：618679828
+当前应用版本 **2.0.0**，发布标签 **V2.0.0.261112**。新版客户端和后端需配套升级。完整变更见 [CHANGELOG](CHANGELOG.md)。
 
-## 📋 功能概览
-    部分内容参考了https://github.com/KouriChat/KouriChat
-### 💬 AI 聊天
-- **多角色对话** — 创建多个 AI 角色，每个角色拥有独立人设、记忆和系统提示词
-- **分段发送** — AI 回复自动分段，模拟真人打字节奏
-- **表情包系统** — AI 根据情绪自动发送表情包（支持自定义表情包文件夹）
-- **核心记忆** — AI 记住用户的重要信息，跨对话持久化
-- **短期记忆** — AI 维护对话上下文，自动总结长对话
-- **图片识别** — 发送图片给 AI，支持 Vision API 识别图片内容
-- **外挂记录** — 支持json、txt等文本文件加载至角色信息中，该文本信息与聊天记录同级发送（即可以加载其他渠道的聊天记录等）
+## ✨ 功能
 
-### 👥 群聊
-- **多角色群聊** — 创建包含多个 AI 角色的群聊
-- **AI ↔ AI 互动** — AI 角色之间可以互相对话
-- **独立配置** — 每个群聊可单独配置参与角色和行为
+| 类别 | 能力 |
+| --- | --- |
+| 微信式体验 | 聊天列表、通讯录、发现、个人中心、语音条 |
+| 多角色与群聊 | 独立人设、参数、上下文与角色 API 覆盖；群聊发言概率、频率及互动控制 |
+| 统一后端 | AI、语音、任务和主动行为由后端执行；客户端不直连第三方 AI |
+| 单独供应商 | 单个角色可单独设置独立的供应商 |
+| 账号与设备 | 首次创建唯一管理员、设备管理、长期登录、撤销与改密；Android Keystore 加密保存会话 |
+| 历史与同步 | 游标分页、增量同步、版本冲突处理、收藏、角色、设置与记忆同步 |
+| 本地记忆 | 核心/短期/情景/知识分类，事实与待验证推测、分域与共享控制；全文检索加可选 CPU 向量模型 |
+| 自主行为 | 内部生活事件、主动聊天、朋友圈、定时任务；安静时段、频率和预算约束 |
+| 豆包语音 | 全局开关、角色音色、资源配置、显式试听；播放时长、文字展开与失败降级 |
+| 人设好友码 | 通过好友码分享角色，分享名称、简介、人设和可选外挂 JSON；预览、差异比较、独立导入与更新 |
+| 数据保护 | 业务备份、下载与保护性恢复，旧数据迁移报告、私有资源鉴权、脱敏分类日志 |
+| 提醒 | 单聊/群聊未读及可选 Android 后台接收；受系统省电和运行时限约束 |
 
-### 📱 朋友圈
-- **AI 自动发布** — AI 角色按调度自动发布朋友圈动态
-- **互动系统** — 支持点赞、评论、回复评论
-- **AI 互动** — AI 角色会自动点赞和评论其他帖子
-- **朋友圈感知** — 聊天中 AI 会感知朋友圈动态，自然提及
+## 🆕 相比 1.0.2 的主要变化
 
-### ⏰ 主动消息 & 定时任务
-- **主动消息** — AI 角色在随机间隔后主动发送消息
-- **安静时间** — 设置免打扰时段，AI 不会在此期间发消息
-- **定时任务** — 设置定时提醒，AI 以角色身份发送提醒消息
-- **冷启动补偿** — 应用重启后自动补发已过期的消息
+- 从客户端分散调用迁移为带管理员鉴权的统一后端，增加设备长期会话与撤销。
+- 增加全局/角色 API、独立意图和视觉配置、供应商地址快捷选择、豆包 TTS 与语音消息。
+- 增加本地混合记忆管理、自主行为预算、人设好友码、服务器同步与完整业务备份。
+- 修复角色设置串号风险、跨重启资源缓存、历史全量加载、短期上下文身份与顺序问题。
+- 修复发送后输入残留、失败原文丢失、供应商回显为空、未知请求无法手动恢复及聊天时间偏差。
+- 统一 Windows 虚拟环境启动，首次按 requirements 安装依赖，Python 由用户自行安装。
+- 当前版本整体使用 AGPL-3.0-only，保留原 MIT 版权与授权声明。
 
-### 🎨 界面
-- **微信风格 UI** — 完整复刻微信界面：聊天列表、通讯录、朋友圈、个人主页
-- **背景** — 支持聊天背景和朋友圈封面图修改
-- **收藏功能** — 收藏消息，支持分类浏览
+## 🚀 快速部署
 
-### ⚙️ 可配置性
-- **全局 Base Prompt** — 统一设置所有角色共用的基础提示词
-- **角色级配置** — 每个角色独立配置：温度、频率惩罚、存在惩罚、最大上下文轮数
-- **API 设置** — 支持 OpenAI 兼容的任意 API（如 DeepSeek、Claude 等）
-- **前后端同步** — 角色数据、消息、记忆自动同步到后端
+准备 Android 手机、Windows x64 电脑、Python 3.11 x64 及可用的 OpenAI 兼容供应商配置。后端需保持运行；不支持离线 AI 聊天。
 
----
+### 1. 启动后端
 
-## 🏗 架构
+从 Releases 获取后端包，完整解压到自己可写的目录（确保当前设备已有Python），然后双击 **start.bat**。
 
-```
-zerochat/
-├── lib/                        # Flutter 前端
-│   ├── main.dart               # 应用入口
-│   ├── core/                   # 核心逻辑
-│   │   ├── chat_controller.dart    # 聊天控制器（核心）
-│   │   ├── message_store.dart      # 消息存储
-│   │   ├── moments_scheduler.dart  # 朋友圈调度器
-│   │   ├── proactive_message_scheduler.dart  # 主动消息调度
-│   │   ├── group_scheduler.dart    # 群聊调度
-│   │   ├── memory_manager.dart     # 记忆管理
-│   │   └── segment_sender.dart     # 分段发送工具
-│   ├── models/                 # 数据模型
-│   ├── pages/                  # 页面（21个）
-│   ├── services/               # 服务层（15个）
-│   └── widgets/                # 自定义组件
-│
-└── server/                     # FastAPI 后端
-    ├── main.py                 # 服务入口
-    ├── requirements.txt        # Python 依赖
-    ├── start.bat               # 一键启动脚本（Windows）
-    ├── routers/                # API 路由
-    │   ├── ai_behavior.py      # AI 行为统一入口
-    │   ├── chat.py             # 聊天 API
-    │   ├── roles.py            # 角色管理 API
-    │   ├── moments.py          # 朋友圈 API
-    │   ├── tasks.py            # 定时任务 API
-    │   └── settings.py         # 设置 API
-    └── services/               # 后端服务
-        ├── ai_service.py       # AI 调用服务
-        ├── memory_service.py   # 记忆管理
-        ├── scheduler_service.py # 调度器服务
-        └── settings_service.py # 配置管理
-```
+脚本会在后端目录创建 `venv`，仅在该虚拟环境中安装 `requirements.txt` 依赖；不安装或升级系统 Python。首次需要网络，后续检查现有依赖。不要复制其他电脑的 venv。
 
----
+启动后访问 `http://127.0.0.1:8000/api/health`。首次凭证在后端 `config/setup-token.txt`，新凭证为 12 位字符；它不是预设账号密码。
 
-## 🚀 快速开始
+### 2. 安装并连接 Android
 
-### 方式一：傻瓜部署（推荐）
+安装 **ZeroChat.apk**，在登录页填写后端地址。首次部署用初始化凭证创建唯一管理员；新账号与密码均为 **6—14 个字符**，初始化后不再开放注册。
 
-> 无需安装 Flutter 或任何开发工具，适合普通用户。
+| 场景 | 后端地址 |
+| --- | --- |
+| 手机与电脑同一可信局域网 | `http://电脑局域网IP:8000` |
+| 已配置 HTTPS 的服务器 | `https://自己的后端域名` |
+| Android 模拟器访问宿主机 | `http://10.0.2.2:8000` |
 
-#### 你需要准备
+同一 Wi-Fi 仍需电脑防火墙允许专用网络访问端口。随附 APK 允许局域网 HTTP；HTTP 会明文传输登录和业务内容，只应在可信网络使用。公网配置 HTTPS 反向代理，勿直接公开 HTTP 端口或数据目录。
 
-| 材料 | 说明 |
-|------|------|
-| **ZeroChat.apk** | 安卓安装包，直接安装到手机 |
-| **zerochat-server.zip** | 后端压缩包，解压到服务器即可运行 |
-| **一台服务器**（或本机） | 需要预装 Python 3.11+，详见下方"没有云服务器？"章节 |
-| **AI API Key** | 支持 OpenAI 兼容 API（如 DeepSeek、通义千问等） |
+同一设备首次登录后自动恢复加密会话，正常重启不必重复登录。退出、撤销、重置密码、卸载/清数据或切换后端等情况可能需要重新登录。断网保留会话与草稿，不自动重放收费请求。
 
-#### 📦 压缩包内容（zerochat-server.zip）
+### 3. 配置 AI 与语音（语音可选，目前支持豆包TTS）
 
-```
-zerochat-server/
-├── main.py                 # 后端入口
-├── requirements.txt        # Python 依赖
-├── start.bat               # Windows 一键启动
-├── start.sh                # Linux/Mac 一键启动
-├── routers/                # API 路由（6 个 .py + __init__.py）
-│   ├── __init__.py
-│   ├── ai_behavior.py
-│   ├── chat.py
-│   ├── moments.py
-│   ├── roles.py
-│   ├── settings.py
-│   └── tasks.py
-└── services/               # 后端服务（6 个 .py + __init__.py）
-    ├── __init__.py
-    ├── ai_service.py
-    ├── memory_service.py
-    ├── scheduler_service.py
-    ├── search_service.py
-    └── settings_service.py
-```
+进入 **我 → AI 接口设置**，保存供应商地址、Key 与完整模型 ID。支持 DeepSeek、智谱 GLM、Kimi、通义地址快捷选择，以及自定义 OpenAI 兼容网关。快捷项不会替你提供账号、余额或模型权限；模型列表读取失败时可手填。
 
-#### 步骤
+- API Key 仅保存在后端，不回显完整内容；更换供应商来源需要对应密钥。
+- 角色 API 留空继承全局，可在角色设置中覆盖。确认是否有旧角色独立配置，避免只修改全局却仍使用原角色供应商。
+- 视觉识别需启用并选择支持图片的模型；不是所有聊天模型均支持。
+- TTS 位于同一设置页，先启用总开关，再配置豆包 Key、音色及资源 ID；角色可继承或覆盖音色。
+- 主动点击语音试听、视觉请求或发送消息可能收费。失败或超时不自动切换收费供应商。
 
-**1. 部署后端**
+非流式生成等待供应商最多约 180 秒。失败后先查询原结果，已完成则恢复；已结束但结果未知时，明确确认后可发起新请求，可能重复计费。配置正确仍受供应商权限、模型兼容性、余额和网络影响。
 
-```bash
-# 1. 将 zerochat-server.zip 上传到服务器并解压
-unzip zerochat-server.zip
-cd zerochat-server
+## 🧠 向量模型是可选项
 
-# 2. 启动服务（首次运行自动创建虚拟环境和安装依赖）
-# Windows:
-start.bat
-# Linux/Mac:
-chmod +x start.sh && ./start.sh
-```
+无模型时保留本地全文检索和正常聊天，换种说法或间接关联的长期记忆召回可能减弱。后端**不会**在聊天请求中自动下载模型，也**不会**自动改用收费在线向量接口。
 
-启动后访问 `http://服务器IP:8000` 确认服务正常。
+可在明确安装位置后准备本地 CPU 模型，当前默认约 91 MiB；重启并在记忆管理菜单重建索引即可用于已有记忆，模型权重不随源码包提供。
 
-**2. 安装 APK**
-- 将 `ZeroChat.apk` 传到手机，直接安装
-- 打开应用，进入 **我 → AI 接口设置**
+## 💾 数据与升级
 
-**3. 配置连接**
+- 后端首次运行生成 `config/`、`data/`、`runtime/`；源码和后端压缩包不含账号、Key、聊天、素材、模型或虚拟环境。
+- 后续更新可提前导出手机本地数据，并在 **设置 → 数据同步与备份** 创建、下载业务备份。停止后端再更新源码，保留私有目录。
+- 可下载业务备份默认排除管理员登录凭证、设备会话和供应商密钥；换服务器时重新初始化并单独配置密钥。
+- 相同包名覆盖升级还需要相同签名。本次使用独立发布签名，可能无法覆盖原版签名；先验证备份与迁移，再决定安装方式，不要直接卸载唯一数据副本。
+- 旧数据迁移会先保护原件，无法可靠转换的内容保留并报告。不要手动合并不同账号或不同后端的数据目录。
 
-| 设置项 | 示例值 | 说明 |
-|--------|--------|------|
-| API URL | `https://api.deepseek.com/v1/chat/completions` | AI 服务 API 地址 |
-| API Key | `sk-xxxxxxxxxxxxxxxx` | 你的 API 密钥 |
-| 模型 | `deepseek-chat` | 模型名称 |
-| 后端地址 | `http://你的服务器IP:8000` | ZeroChat 后端地址 |
+## 🛠 从源码构建
 
----
+源码包含 Flutter 客户端、Android 原生桥接和 FastAPI 后端，生产默认包名 `com.zerochat.zerochat`。构建所需缓存、工具路径和密钥由开发者本机提供。
 
-### 🌐 没有云服务器？
-
-以下方案让你无需购买云服务器，也能让手机连接到电脑上运行的后端：
-
-#### 方案一：同一 WiFi 局域网（最简单）
-
-手机和电脑连同一个 WiFi，在电脑上启动后端后：
-
-```
-后端地址填写: http://电脑局域网IP:8000
-```
-
-> 查看电脑 IP：Windows 打开 CMD 输入 `ipconfig`，找到 `IPv4 地址`（通常是 `192.168.x.x`）
-
-#### 方案二：内网穿透（手机不在同一网络）
-
-使用内网穿透工具将本地 8000 端口暴露到公网：
-
-| 工具 | 特点 | 命令示例 |
-|------|------|----------|
-| [**cpolar**](https://www.cpolar.com/) | 国内速度快，免费版够用 | `cpolar http 8000` |
-| [**ngrok**](https://ngrok.com/) | 全球流行，免费版有限 | `ngrok http 8000` |
-| [**frp**](https://github.com/fatedier/frp) | 自建服务器，完全掌控 | 需自行配置 |
-| [**花生壳**](https://hsk.oray.com/) | 国内免费 DDNS | 需注册 |
-
-运行穿透工具后，会得到一个公网地址（如 `https://xxx.cpolar.top`），将其填入应用的"后端地址"即可。
-
-#### 方案三：Android 模拟器（开发调试）
-
-如果用 Android 模拟器，后端地址填写：
-```
-http://10.0.2.2:8000
-```
-> `10.0.2.2` 是 Android 模拟器访问宿主机的特殊 IP。
-
----
-
-### 方式二：开发者部署（从源码构建）
-
-> 适合想修改代码或参与开发的用户。
-
-#### 前提条件
-
-| 工具 | 版本 | 说明 |
-|------|------|------|
-| Flutter | 3.x+ | [安装指南](https://docs.flutter.dev/get-started/install) |
-| Python | 3.11+ | [下载](https://www.python.org/downloads/) |
-| Android Studio / VS Code | 最新版 | Flutter IDE |
-| AI API Key | - | 支持 OpenAI 兼容 API |
-
-```bash
-# 1. 启动后端
-cd server
-start.bat          # Windows
-# 或: chmod +x start.sh && ./start.sh  # Linux/Mac
-
-# 2. 启动前端
+```powershell
 flutter pub get
+flutter analyze
 flutter run
 ```
 
-在应用内进入 **我 → AI 接口设置**，配置 API URL、API Key、模型和后端地址。
 
----
+```text
+lib/             Flutter 页面、模型、服务与组件
+android/         Android 配置、资源与原生桥接
+server/          后端入口、路由、服务和运维工具
+licenses/        原项目授权声明
+```
 
+## 📌 使用边界
 
-
----
+- 当前交付目标为 Android 与 Windows x64 / Python 3.11 x64。
+- 当前只提供豆包 TTS，Qwen/OpenAI TTS 尚未接入。
+- 角色生活事件是内部模拟，不代表控制了真实应用。联网搜索与模型事实仍需核实。
+- 后台接收为用户开启的 Android 前台服务，受系统时限、厂商省电和强停影响，不能保证全天送达。
+- Key 在后端配置中仍是明文，需保护目录权限；选中的聊天/记忆可能发送给第三方模型，不应将服务商视为本地存储。
+- 图片上限 9 MiB；单份业务备份上限 256 MiB / 20000 文件；聊天、素材和音频不自动清理。
+- 供应商、多设备协作、Windows/Android 系统版本和长期大规模使用的兼容性，仍取决于具体部署环境。
 
 ## 📱 截图
 
@@ -249,14 +133,12 @@ flutter run
 
 ---
 
-## 🤝 贡献
+## 🤝 贡献与反馈
 
-欢迎提交 Issue 和 Pull Request！
+欢迎通过原仓库 Issue 与 Pull Request 提交可复现问题。请先脱敏，勿上传账号、密钥、聊天、人设私密附件、备份、日志或本机路径。
+
 
 ## 📄 许可证
 
-MIT License
-
-
-
+当前版本整体按 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）** 发布，完整文本见 [LICENSE](LICENSE)，来源与声明见 [NOTICE](NOTICE)。原 MIT 代码的版权与授权保留于 [licenses/MIT-original.txt](licenses/MIT-original.txt)，不撤销先前 MIT 版本已有授权。
 

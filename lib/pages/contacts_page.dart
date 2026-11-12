@@ -1,3 +1,4 @@
+import '../widgets/resource_image.dart';
 import 'package:flutter/material.dart';
 import 'package:lpinyin/lpinyin.dart';
 import '../models/role.dart';
@@ -5,6 +6,7 @@ import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
 import 'role_detail_page.dart';
 import 'group_settings_page.dart';
+import 'role_share_page.dart';
 
 /// 通讯录页面
 /// ZeroChat 风格，显示所有 AI 角色，按字母排序
@@ -25,12 +27,14 @@ class ContactsPageState extends State<ContactsPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    RoleService.changes.addListener(_loadRoles);
     _loadRoles();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    RoleService.changes.removeListener(_loadRoles);
     super.dispose();
   }
 
@@ -102,6 +106,11 @@ class ContactsPageState extends State<ContactsPage>
         children: [
           // 群聊入口
           _buildGroupChatEntry(),
+          ListTile(leading: const Icon(Icons.person_add_alt), title: const Text('输入好友码导入角色'), trailing: const Icon(Icons.chevron_right, color: Color(0xFFBBBBBB)),
+            onTap: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => const RoleSharePage()));
+              _loadRoles();
+            }),
           // 角色列表
           Expanded(
             child: _roles.isEmpty
@@ -333,7 +342,7 @@ class ContactsPageState extends State<ContactsPage>
     if (role.avatarUrl != null && role.avatarUrl!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
+        child: ResourceImage(
           role.avatarUrl!,
           width: 40,
           height: 40,

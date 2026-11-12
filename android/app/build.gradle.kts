@@ -1,7 +1,6 @@
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -9,42 +8,36 @@ android {
     namespace = "com.zerochat.zerochat"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
-
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
-
+    kotlinOptions { jvmTarget = JavaVersion.VERSION_17.toString() }
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.zerochat.zerochat"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        manifestPlaceholders["appLabel"] = "ZeroChat"
+        manifestPlaceholders["allowLanHttp"] = if (System.getenv("ZEROCHAT_ALLOW_LAN_HTTP") == "1") "true" else "false"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
     }
-
-    buildTypes {
-        release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+    val store = System.getenv("ZEROCHAT_KEYSTORE")
+    if (!store.isNullOrBlank()) {
+        signingConfigs.create("production") {
+            storeFile = file(store)
+            storePassword = System.getenv("ZEROCHAT_STORE_PASSWORD")
+            keyAlias = System.getenv("ZEROCHAT_KEY_ALIAS")
+            keyPassword = System.getenv("ZEROCHAT_KEY_PASSWORD")
         }
     }
+    if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) } &&
+        (store.isNullOrBlank() || listOf("ZEROCHAT_STORE_PASSWORD", "ZEROCHAT_KEY_ALIAS", "ZEROCHAT_KEY_PASSWORD").any { System.getenv(it).isNullOrBlank() })) {
+        throw GradleException("正式构建必须配置独立发布密钥及签名环境变量")
+    }
+    buildTypes { release { signingConfig = signingConfigs.findByName("production") } }
 }
-
-flutter {
-    source = "../.."
-}
-
-dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
-}
+flutter { source = "../.." }
+dependencies { coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4") }

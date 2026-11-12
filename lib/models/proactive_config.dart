@@ -34,9 +34,11 @@ class ProactiveConfig {
       triggerPrompt:
           json['trigger_prompt'] as String? ?? '请你模拟角色，给用户发消息，想知道用户在做什么',
       minCountdownHours:
-          (json['min_countdown_hours'] as num?)?.toDouble() ?? 1.0,
+          (json['min_countdown_hours'] as num?)?.toDouble() ??
+          (json['min_interval_minutes'] is num ? (json['min_interval_minutes'] as num) / 60 : 1.0),
       maxCountdownHours:
-          (json['max_countdown_hours'] as num?)?.toDouble() ?? 4.0,
+          (json['max_countdown_hours'] as num?)?.toDouble() ??
+          (json['max_interval_minutes'] is num ? (json['max_interval_minutes'] as num) / 60 : 4.0),
       nextTriggerTime: json['next_trigger_time'] != null
           ? DateTime.parse(json['next_trigger_time'] as String)
           : null,

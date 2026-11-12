@@ -1,8 +1,11 @@
+import '../services/session_service.dart';
+import '../widgets/resource_image.dart';
+import '../services/diagnostics_service.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
+import '../services/backend_http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import '../services/settings_service.dart';
 import 'api_settings_page.dart';
@@ -116,7 +119,7 @@ class _ProfilePageState extends State<ProfilePage> {
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: settings.userAvatarUrl.isNotEmpty
-                  ? Image.network(
+                  ? ResourceImage(
                       settings.userAvatarUrl.startsWith('http')
                           ? settings.userAvatarUrl
                           : '${settings.backendUrl}${settings.userAvatarUrl}',
@@ -171,6 +174,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   void _editProfile() async {
+    final generation = SessionService.instance.generation;
     final nicknameController = TextEditingController(
       text: SettingsService.instance.userNickname,
     );
@@ -215,7 +219,7 @@ class _ProfilePageState extends State<ProfilePage> {
                             fit: BoxFit.cover,
                           )
                         : (currentAvatarUrl.isNotEmpty
-                              ? Image.network(
+                              ? ResourceImage(
                                   currentAvatarUrl.startsWith('http')
                                       ? currentAvatarUrl
                                       : '${SettingsService.instance.backendUrl}$currentAvatarUrl',
@@ -264,6 +268,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
 
     if (result == true) {
+      if (!mounted || generation != SessionService.instance.generation) return;
       String? newAvatarUrl;
 
       // 上传头像到后端
@@ -279,9 +284,9 @@ class _ProfilePageState extends State<ProfilePage> {
               contentType: MediaType('image', 'jpeg'),
             ),
           );
-          final response = await request.send();
+          final response = await http.upload(request);
           if (response.statusCode == 200) {
-            final respStr = await response.stream.bytesToString();
+            final respStr = response.body;
             // 解析 JSON 响应
             if (respStr.contains('"path"')) {
               final match = RegExp(
@@ -291,13 +296,21 @@ class _ProfilePageState extends State<ProfilePage> {
                 newAvatarUrl = match.group(1);
               }
             }
-            debugPrint('Avatar uploaded: $newAvatarUrl');
+            DiagnosticsService.event('chat', 'legacy_event');
+          } else {
+            throw StateError('头像上传失败（${response.statusCode}）');
           }
         } catch (e) {
-          debugPrint('Avatar upload failed: $e');
+          DiagnosticsService.event('chat', 'legacy_event', error: e);
+          if (mounted)
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('头像上传失败，请恢复连接后手动重试')));
+          return;
         }
       }
 
+      if (!mounted || generation != SessionService.instance.generation) return;
       await SettingsService.instance.updateUserProfile(
         nickname: nicknameController.text.isNotEmpty
             ? nicknameController.text
@@ -371,14 +384,14 @@ class _ProfilePageState extends State<ProfilePage> {
     final settings = SettingsService.instance;
     final parts = <String>[];
 
-    if (settings.chatApiKey.isNotEmpty) {
-      parts.add('Chat ✓');
+    if (settings.chatApiConfigured) {
+      parts.add('聊天已配置');
     }
-    if (settings.intentEnabled && settings.intentApiKey.isNotEmpty) {
-      parts.add('Intent ✓');
+    if (settings.intentEnabled && settings.intentApiConfigured) {
+      parts.add('意图已配置');
     }
-    if (settings.visionEnabled && settings.visionApiKey.isNotEmpty) {
-      parts.add('Vision ✓');
+    if (settings.visionEnabled && settings.visionApiConfigured) {
+      parts.add('视觉已配置');
     }
 
     return parts.isEmpty ? '未配置' : parts.join(' · ');

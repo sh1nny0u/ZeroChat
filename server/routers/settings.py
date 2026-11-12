@@ -1,9 +1,11 @@
+from fastapi import Request
+from services.resource_service import resource_response
 """
 设置路由
 管理全局配置的 API 端点
 """
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -15,6 +17,21 @@ class SettingsUpdate(BaseModel):
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
+    intent_enabled: Optional[bool] = None
+    intent_api_url: Optional[str] = None
+    intent_api_key: Optional[str] = None
+    intent_model: Optional[str] = None
+    vision_enabled: Optional[bool] = None
+    vision_api_url: Optional[str] = None
+    vision_api_key: Optional[str] = None
+    vision_model: Optional[str] = None
+    message_wait_seconds: Optional[int] = Field(default=None, ge=0, le=60)
+    base_prompt: Optional[str] = None
+    group_prompt: Optional[str] = None
+    memory_prompt: Optional[str] = None
+    quiet_enabled: Optional[bool] = None
+    quiet_start: Optional[int] = None
+    quiet_end: Optional[int] = None
     host: Optional[str] = None
     port: Optional[int] = None
 
@@ -22,55 +39,76 @@ class SettingsUpdate(BaseModel):
 async def get_settings():
     """获取全局设置"""
     settings = settings_service.load_settings()
-    # 隐藏敏感信息
-    if settings.get("ai_api_key"):
-        key = settings["ai_api_key"]
-        settings["ai_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-        del settings["ai_api_key"]
+    for field in ("ai_api_key", "intent_api_key", "vision_api_key"):
+        settings[field + "_configured"] = bool(settings.pop(field, ""))
+    for prefix in ('ai', 'intent', 'vision'):
+        selected = settings_service.provider_config(settings_service.load_settings(), prefix)
+        settings[prefix + '_ready'] = bool(selected['api_url'] and selected['api_key'])
+        settings.pop(prefix + '_credential_origin', None)
+    settings.pop("role_api_credentials", None)
+    settings.pop("tts_credentials", None)
     return {"settings": settings}
 
 @router.put("/settings")
 async def update_settings(update: SettingsUpdate):
     """更新全局设置"""
-    updates = {}
-    
-    if update.ai_api_url is not None:
-        updates["ai_api_url"] = update.ai_api_url
-    if update.ai_api_key is not None:
-        updates["ai_api_key"] = update.ai_api_key
-    if update.ai_model is not None:
-        updates["ai_model"] = update.ai_model
-    if update.host is not None:
-        updates["host"] = update.host
-    if update.port is not None:
-        updates["port"] = update.port
-    
+    updates = update.model_dump(exclude_none=True)
+    for field in ("ai_api_url", "intent_api_url", "vision_api_url"):
+        if updates.get(field):
+            from services.role_api_service import validate_url
+            validate_url(updates[field])
+    for field in ("quiet_start", "quiet_end"):
+        if field in updates and not 0 <= updates[field] <= 23:
+            from fastapi import HTTPException
+            raise HTTPException(422, "安静时段须为 0 至 23 点")
+
     if updates:
         success = settings_service.save_settings(updates)
         if success:
             return {"success": True, "message": "Settings updated"}
         else:
-            return {"success": False, "error": "Failed to save settings"}
+            from fastapi import HTTPException
+            raise HTTPException(500, "设置保存失败，请手动重试")
     
     return {"success": True, "message": "No changes"}
+
+
+@router.post("/settings/migrate")
+async def migrate_settings(update: SettingsUpdate):
+    """Import legacy device defaults only where this server has no value."""
+    current = settings_service.load_settings()
+    proposed = update.model_dump(exclude_none=True)
+    missing = {}
+    for prefix in ("ai", "intent", "vision"):
+        provider_empty = not current.get(prefix + "_api_url") and not current.get(prefix + "_api_key")
+        for suffix in ("api_url", "api_key", "model"):
+            field = prefix + "_" + suffix
+            value = proposed.pop(field, None)
+            if provider_empty and value:
+                missing[field] = value
+    for field, value in proposed.items():
+        if field in ("host", "port") or value in (None, ""):
+            continue
+        if field not in current or current[field] in (None, ""):
+            missing[field] = value
+    return await update_settings(SettingsUpdate(**missing))
 
 @router.get("/settings/ai")
 async def get_ai_settings():
     """获取 AI API 配置（不含敏感信息）"""
     config = settings_service.get_ai_config()
-    # 隐藏 API KEY
-    if config.get("api_key"):
-        key = config["api_key"]
-        config["api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-        del config["api_key"]
+    config["api_key_configured"] = bool(config.pop("api_key", ""))
     return config
 
 @router.get("/settings/models")
-async def get_available_models():
+async def get_available_models(purpose: str = 'chat'):
     """获取 API 可用模型列表"""
     import httpx
     
-    config = settings_service.get_ai_config()
+    if purpose not in ('chat', 'intent', 'vision'):
+        from fastapi import HTTPException
+        raise HTTPException(422, '无效 API 用途')
+    config = settings_service.get_ai_config(purpose)
     api_url = config.get("api_url", "")
     api_key = config.get("api_key", "")
     
@@ -81,9 +119,8 @@ async def get_available_models():
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # 构建 models 端点 URL
-            models_url = api_url.rstrip("/")
-            if not models_url.endswith("/models"):
-                models_url = f"{models_url}/models"
+            from services.ai_service import models_endpoint
+            models_url = models_endpoint(api_url)
             
             response = await client.get(
                 models_url,
@@ -96,12 +133,13 @@ async def get_available_models():
                 # 提取模型 ID 列表
                 model_ids = [m.get("id") for m in models if m.get("id")]
                 # 过滤常见的可用模型
-                chat_models = [m for m in model_ids if any(x in m.lower() for x in ["gpt", "claude", "gemini", "llama", "qwen", "glm", "deepseek"])]
-                return {"success": True, "models": chat_models or model_ids[:20]}
+                return {"success": True, "models": list(dict.fromkeys(model_ids))}
             else:
                 return {"success": False, "error": f"HTTP {response.status_code}", "models": []}
-    except Exception as e:
-        return {"success": False, "error": str(e), "models": []}
+    except Exception:
+        from services.logging_service import get_logger
+        get_logger("settings").exception("", extra={"event": "model_list_failed"})
+        return {"success": False, "error": "模型列表获取失败，请手动重试", "models": []}
 
 # 头像上传
 from fastapi import UploadFile, File
@@ -109,22 +147,23 @@ from pathlib import Path
 import shutil
 import uuid
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+from services.paths_service import DATA_DIR
 AVATARS_DIR = DATA_DIR / "avatars"
 
 @router.post("/settings/avatar")
 async def upload_avatar(file: UploadFile = File(...)):
     """上传用户头像"""
+    from services.upload_service import image
+    content, ext = await image(file)
     AVATARS_DIR.mkdir(parents=True, exist_ok=True)
     
     # 生成唯一文件名
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
     filename = f"user_avatar_{uuid.uuid4().hex[:8]}.{ext}"
     filepath = AVATARS_DIR / filename
     
     # 保存文件
-    with open(filepath, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    with open(filepath, "xb") as f:
+        f.write(content)
     
     # 返回相对路径
     return {
@@ -134,11 +173,18 @@ async def upload_avatar(file: UploadFile = File(...)):
     }
 
 @router.get("/avatars/{filename}")
-async def get_avatar(filename: str):
+async def get_avatar(filename: str, request: Request):
     """获取头像文件"""
     from fastapi.responses import FileResponse
     filepath = AVATARS_DIR / filename
     if filepath.exists():
-        return FileResponse(filepath)
+        return resource_response(filepath, request)
     return {"error": "not found"}
+
+
+@router.post("/settings/images")
+async def upload_display_image(file: UploadFile = File(...)):
+    """Persistent authenticated resources shared by every device."""
+    result = await upload_avatar(file)
+    return {"path": result["path"]}
 

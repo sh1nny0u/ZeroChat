@@ -23,13 +23,17 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
   void initState() {
     super.initState();
     _loadTasks();
+    TaskService.changes.addListener(_loadTasks);
   }
+
+  @override
+  void dispose() { TaskService.changes.removeListener(_loadTasks); super.dispose(); }
 
   void _loadTasks() {
     setState(() {
       _tasks = TaskService.getTasksForChat(
         widget.roleId,
-      ).where((t) => !t.isCompleted).toList();
+      ).toList();
       _tasks.sort((a, b) => a.triggerTime.compareTo(b.triggerTime));
     });
   }
@@ -119,13 +123,17 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
         ),
         title: Text(task.message, style: const TextStyle(fontSize: 15)),
         subtitle: Text(
-          _formatTime(task.triggerTime),
+          '${_formatTime(task.triggerTime)}${task.lastStatus == 'failed' ? '\n供应商处理失败，可手动重试' : task.lastStatus == 'uncertain' ? '\n结果未确认，请先检查聊天记录，未重复调用' : ''}',
           style: TextStyle(
             fontSize: 13,
             color: isPast ? Colors.red : const Color(0xFF888888),
           ),
         ),
-        trailing: IconButton(
+        trailing: task.lastStatus == 'failed' && task.isCompleted ? TextButton(
+          onPressed: () async {
+            try { await TaskService.retryTask(task.id); if (mounted) _loadTasks(); }
+            catch (error) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error'))); }
+          }, child: const Text('重试')) : IconButton(
           onPressed: () => _deleteTask(task),
           icon: const Icon(Icons.delete_outline, color: Color(0xFFCCCCCC)),
         ),
@@ -235,12 +243,15 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
                 final message = messageController.text.trim();
                 if (message.isEmpty) return;
 
-                await TaskService.addReminder(
+                try { await TaskService.addReminder(
                   chatId: widget.roleId,
                   roleId: widget.roleId,
                   message: message,
                   triggerTime: selectedTime,
-                );
+                ); } catch (error) {
+                  if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('$error')));
+                  return;
+                }
 
                 if (context.mounted) {
                   Navigator.pop(context);
@@ -271,10 +282,9 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
             child: const Text('取消'),
           ),
           TextButton(
-            onPressed: () {
-              TaskService.cancelTask(task.id);
-              Navigator.pop(context);
-              _loadTasks();
+            onPressed: () async {
+              try { await TaskService.cancelTask(task.id); if (context.mounted) Navigator.pop(context); if (mounted) _loadTasks(); }
+              catch (error) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('$error'))); }
             },
             child: const Text('删除', style: TextStyle(color: Colors.red)),
           ),

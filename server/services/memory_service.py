@@ -3,14 +3,21 @@
 管理角色的短期记忆和核心记忆
 """
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from services.logging_service import get_logger, reference
+from services.sync_service import local_commit
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+logger = get_logger("memory")
+
+from services.paths_service import DATA_DIR
 ROLES_DIR = DATA_DIR / "roles"
 
 def get_memory_file(role_id: str) -> Path:
+    from services.sync_service import identity
+    identity(role_id)
     role_dir = ROLES_DIR / role_id
     role_dir.mkdir(parents=True, exist_ok=True)
     return role_dir / "memory.json"
@@ -32,9 +39,11 @@ def save_memory(role_id: str, memory: Dict):
     """保存角色记忆"""
     memory_file = get_memory_file(role_id)
     memory["updated_at"] = datetime.now().isoformat()
-    with open(memory_file, "w", encoding="utf-8") as f:
-        json.dump(memory, f, indent=2, ensure_ascii=False)
+    from services.sync_service import write_json
+    write_json(memory_file, memory)
+    logger.info("", extra={"event": "memory_saved", "role_ref": reference(role_id)})
 
+@local_commit
 def append_short_term(role_id: str, role: str, content: str):
     """
     追加短期记忆
@@ -47,6 +56,7 @@ def append_short_term(role_id: str, role: str, content: str):
     memory = load_memory(role_id)
     
     memory["short_term"].append({
+        "id": uuid.uuid4().hex,
         "role": role,
         "content": content,
         "timestamp": datetime.now().isoformat()
@@ -65,19 +75,22 @@ def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
     Returns:
         [{"role": "user/assistant", "content": "..."}]
     """
-    memory = load_memory(role_id)
-    short_term = memory.get("short_term", [])
-    
-    return [
-        {"role": m["role"], "content": m["content"]}
-        for m in short_term[-limit:]
-    ]
+    from services import hybrid_memory_service as hybrid
+    hybrid.ensure_index()
+    rows = [e for e in hybrid.entries_from_index() if e.get("category") == "short_term"
+            and hybrid.allowed(e, role_id, role_id)]
+    rows.sort(key=lambda e: (e.get('message_time') or e['created_at'], e.get('message_order', 0), e['id']))
+    return [{"role": "assistant" if e["source"].endswith(":assistant") else "user", "content": e["content"]}
+            for e in (rows[-limit:] if limit > 0 else [])]
 
 def get_core_memory(role_id: str) -> str:
     """获取核心记忆"""
-    memory = load_memory(role_id)
-    return memory.get("core_memory", "")
+    from services import hybrid_memory_service as hybrid
+    hybrid.ensure_index()
+    return "\n".join(e["content"] for e in hybrid.entries_from_index()
+                     if e.get("category") == "core" and hybrid.allowed(e, role_id, role_id))
 
+@local_commit
 def update_core_memory(role_id: str, core_memory: str):
     """更新核心记忆（由 AI 总结生成）"""
     memory = load_memory(role_id)
@@ -102,22 +115,25 @@ def should_summarize(role_id: str) -> bool:
         return count >= 20
     return count >= 30
 
-async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]:
+async def trigger_memory_summary(role_id: str, role_data: Dict, force=False) -> Optional[str]:
     """
     触发记忆总结（内部调用，不暴露给前端）
     
     Returns:
         新的核心记忆内容，或 None（如果不需要总结）
     """
-    if not should_summarize(role_id):
+    memory = load_memory(role_id)
+    interval = max(1, min(1000, role_data.get("summary_every_n_rounds", 20))) * 2
+    if not force and memory.get("message_count_since_summary", 0) < interval:
         return None
     
     # 导入 AI 服务
     from services.ai_service import call_ai
     
     memory = load_memory(role_id)
-    short_term = memory.get("short_term", [])
-    current_core = memory.get("core_memory", "")
+    summarized_count = memory.get('message_count_since_summary', 0)
+    short_term = get_context_messages(role_id, 30)
+    current_core = get_core_memory(role_id)
     
     # 构建总结提示
     conversation = "\n".join([
@@ -135,26 +151,45 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
 
 请输出更新后的核心记忆（100字以内），格式为要点列表。只输出记忆内容，不要解释。"""
 
-    result = await call_ai([{"role": "user", "content": prompt}], temperature=0.3)
+    from services.ai_service import load_config
+    messages = [{"role": "system", "content": load_config().get("memory_prompt", "")},
+                {"role": "user", "content": prompt}]
+    if force:
+        result = await call_ai(messages, temperature=0.3, role_id=role_id)
+    else:
+        from services import behavior_service as autonomy
+        if autonomy.gate(role_id, "memory") != "ready":
+            return None
+        with autonomy.optional(role_id, "memory", "summary:" + role_id):
+            result = await call_ai(messages, temperature=0.3, role_id=role_id)
     
     if result["success"] and result["content"]:
         new_core = result["content"].strip()
-        update_core_memory(role_id, new_core)
+        from services.hybrid_memory_service import propose
+        propose(role_id, new_core, "单聊自动总结，需用户确认；来源为最近30条对话")
+        _finish_summary(role_id, summarized_count)
         return new_core
     
     return None
 
+@local_commit
+def _finish_summary(role_id: str, summarized_count: int):
+    memory = load_memory(role_id)
+    memory['last_summarized_at'] = datetime.now().isoformat()
+    memory['message_count_since_summary'] = max(0, memory.get('message_count_since_summary', 0) - summarized_count)
+    save_memory(role_id, memory)
+
+
+@local_commit
 def clear_short_term(role_id: str):
     """清空短期记忆"""
     memory = load_memory(role_id)
     memory["short_term"] = []
     save_memory(role_id, memory)
 
-def get_memory_context_string(role_id: str) -> str:
+def get_memory_context_string(role_id: str, query: str = "", chat_id: str = None) -> str:
     """
     获取记忆上下文字符串（用于 AI 提示）
     """
-    core = get_core_memory(role_id)
-    if core:
-        return f"你对这个用户的了解：{core}"
-    return ""
+    from services.hybrid_memory_service import context
+    return context(role_id, query, chat_id)

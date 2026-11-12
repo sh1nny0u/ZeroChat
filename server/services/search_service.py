@@ -2,10 +2,10 @@
 网络搜索服务
 使用 DuckDuckGo 实现免 API Key 的网络搜索
 """
-import logging
 from typing import Optional, List, Dict
+from services.logging_service import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("chat")
 
 
 def should_search(message: str) -> bool:
@@ -40,7 +40,7 @@ def should_search(message: str) -> bool:
     msg_lower = message.lower()
     for trigger in search_triggers:
         if trigger in msg_lower:
-            logger.info(f"Search triggered by keyword: '{trigger}' in message: '{message[:50]}'")
+            logger.info("", extra={"event": "search_selected"})
             return True
     
     # 问号结尾且包含实体性词汇也可能需要搜索
@@ -48,10 +48,10 @@ def should_search(message: str) -> bool:
         entity_hints = ["谁", "什么", "哪", "几", "多少", "怎么", "为什么", "如何", "有没有", "是不是"]
         for hint in entity_hints:
             if hint in message:
-                logger.info(f"Search triggered by question pattern: '{hint}' in message: '{message[:50]}'")
+                logger.info("", extra={"event": "search_selected"})
                 return True
     
-    logger.debug(f"Search not triggered for message: '{message[:50]}'")
+    logger.debug("", extra={"event": "search_skipped"})
     return False
 
 
@@ -65,7 +65,7 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     try:
         from duckduckgo_search import DDGS
         
-        logger.info(f"Starting web search for: '{query}'")
+        logger.info("", extra={"event": "search_started"})
         
         results = []
         with DDGS(timeout=10) as ddgs:
@@ -76,14 +76,14 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
                     "href": r.get("href", ""),
                 })
         
-        logger.info(f"Search completed: '{query}' -> {len(results)} results")
+        logger.info("", extra={"event": "search_completed", "count": len(results)})
         return results
         
     except ImportError:
-        logger.warning("duckduckgo_search not installed! Run: pip install duckduckgo_search")
+        logger.warning("", extra={"event": "search_dependency_missing", "error_type": "ImportError"})
         return []
-    except Exception as e:
-        logger.error(f"Search error for '{query}': {type(e).__name__}: {e}")
+    except Exception:
+        logger.exception("", extra={"event": "search_failed"})
         return []
 
 

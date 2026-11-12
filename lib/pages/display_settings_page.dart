@@ -1,3 +1,4 @@
+import '../widgets/resource_image.dart';
 import 'package:flutter/material.dart';
 import '../services/settings_service.dart';
 
@@ -162,7 +163,7 @@ class _DisplaySettingsPageState extends State<DisplaySettingsPage> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
-              child: Image.network(
+              child: ResourceImage(
                 previewUrl,
                 height: 100,
                 width: double.infinity,

@@ -1,3 +1,5 @@
+import 'memory_management_page.dart';
+import '../widgets/history_list.dart';
 import 'package:flutter/material.dart';
 import '../models/group_chat.dart';
 import '../models/role.dart';
@@ -134,9 +136,9 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
             ),
             const Divider(height: 1, indent: 16),
             _buildItem(
-              title: '核心记忆',
+              title: '记忆管理',
               trailing: Text(
-                '${_group!.coreMemory.length} 条',
+                '查看与修正',
                 style: const TextStyle(color: Color(0xFF888888)),
               ),
               onTap: _showCoreMemory,
@@ -689,14 +691,8 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
                                 style: TextStyle(color: Color(0xFF888888)),
                               ),
                             )
-                          : ListView.builder(
-                              controller: scrollController,
-                              itemCount: messages.length,
-                              itemBuilder: (context, index) {
-                                final msg = messages[index];
-                                return _buildMessageItem(msg, setModalState);
-                              },
-                            ),
+                          : HistoryList(chatId: widget.groupId,
+                              itemBuilder: (msg) => _buildMessageItem(msg, setModalState)),
                     ),
                   ],
                 );
@@ -836,143 +832,7 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
   }
 
   void _showCoreMemory() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
-      ),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final memories = _group!.coreMemory;
-
-            return DraggableScrollableSheet(
-              initialChildSize: 0.6,
-              minChildSize: 0.3,
-              maxChildSize: 0.9,
-              expand: false,
-              builder: (context, scrollController) {
-                return Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '核心记忆 (${memories.length} 条)',
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          Row(
-                            children: [
-                              TextButton.icon(
-                                onPressed: () => _addCoreMemory(setModalState),
-                                icon: const Icon(Icons.add, size: 18),
-                                label: const Text('添加'),
-                              ),
-                              if (memories.isNotEmpty)
-                                TextButton(
-                                  onPressed: () async {
-                                    await GroupChatService.updateGroup(
-                                      _group!.clearCoreMemory(),
-                                    );
-                                    _loadGroup();
-                                    setModalState(() {});
-                                    setState(() {});
-                                  },
-                                  child: const Text(
-                                    '清空',
-                                    style: TextStyle(color: Colors.red),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1),
-                    Expanded(
-                      child: memories.isEmpty
-                          ? const Center(
-                              child: Text(
-                                '暂无核心记忆\n点击"添加"来创建',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Color(0xFF888888)),
-                              ),
-                            )
-                          : ListView.builder(
-                              controller: scrollController,
-                              itemCount: memories.length,
-                              itemBuilder: (context, index) {
-                                return ListTile(
-                                  title: Text(memories[index]),
-                                  trailing: IconButton(
-                                    icon: const Icon(
-                                      Icons.delete_outline,
-                                      color: Colors.red,
-                                    ),
-                                    onPressed: () async {
-                                      await GroupChatService.updateGroup(
-                                        _group!.removeCoreMemory(index),
-                                      );
-                                      _loadGroup();
-                                      setModalState(() {});
-                                      setState(() {});
-                                    },
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  void _addCoreMemory(StateSetter setModalState) async {
-    final controller = TextEditingController();
-
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('添加核心记忆'),
-        content: TextField(
-          controller: controller,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            hintText: '例如：用户喜欢编程',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('添加'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != null && result.isNotEmpty) {
-      await GroupChatService.updateGroup(_group!.addCoreMemory(result));
-      _loadGroup();
-      setModalState(() {});
-      setState(() {});
-    }
+    Navigator.push(context, MaterialPageRoute(builder: (_) => MemoryManagementPage(groupId: widget.groupId)));
   }
 
   void _confirmDissolve() {

@@ -1,3 +1,4 @@
+import '../widgets/resource_image.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../models/moment_post.dart';
@@ -199,7 +200,7 @@ class _MomentsPageState extends State<MomentsPage> {
         errorBuilder: (_, __, ___) => fallback,
       );
     } else {
-      return Image.network(
+      return ResourceImage(
         coverUrl,
         fit: BoxFit.cover,
         width: double.infinity,
@@ -238,7 +239,7 @@ class _MomentsPageState extends State<MomentsPage> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(6),
-          child: Image.network(
+          child: ResourceImage(
             avatarUrl,
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => _buildDefaultUserAvatar(nickname),
@@ -512,7 +513,7 @@ class _MomentsPageState extends State<MomentsPage> {
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
+        child: ResourceImage(
           avatarUrl,
           width: 42,
           height: 42,
@@ -579,9 +580,10 @@ class _MomentsPageState extends State<MomentsPage> {
                       : const Color(0xFF333333),
                 ),
                 title: Text(post.isLikedByMe ? '取消赞' : '赞'),
-                onTap: () {
+                onTap: () async {
                   Navigator.pop(context);
-                  MomentsService.instance.toggleLike(post.id);
+                  try { await MomentsService.instance.toggleLike(post.id); }
+                  catch (error) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('$error'))); }
                 },
               ),
               const Divider(height: 1),
@@ -654,10 +656,10 @@ class _MomentsPageState extends State<MomentsPage> {
             ),
             const SizedBox(width: 8),
             TextButton(
-              onPressed: () {
+              onPressed: () async {
                 final content = controller.text.trim();
                 if (content.isNotEmpty) {
-                  MomentsService.instance.addComment(
+                  try { await MomentsService.instance.addComment(
                     post.id,
                     authorId: 'me',
                     authorName: SettingsService.instance.userNickname.isNotEmpty
@@ -666,9 +668,12 @@ class _MomentsPageState extends State<MomentsPage> {
                     content: content,
                     replyToId: replyTo?.authorId,
                     replyToName: replyName,
-                  );
+                  ); } catch (error) {
+                    if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('$error')));
+                    return;
+                  }
                 }
-                Navigator.pop(context);
+                if (context.mounted) Navigator.pop(context);
               },
               child: const Text('发送'),
             ),
@@ -690,9 +695,9 @@ class _MomentsPageState extends State<MomentsPage> {
             child: const Text('取消'),
           ),
           TextButton(
-            onPressed: () {
-              MomentsService.instance.deletePost(post.id);
-              Navigator.pop(context);
+            onPressed: () async {
+              try { await MomentsService.instance.deletePost(post.id); if (context.mounted) Navigator.pop(context); }
+              catch (error) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('$error'))); }
             },
             child: const Text('删除', style: TextStyle(color: Colors.red)),
           ),

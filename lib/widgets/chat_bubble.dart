@@ -1,5 +1,6 @@
+import 'resource_image.dart';
+import 'voice_message.dart';
 import 'dart:io';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../services/sticker_service.dart';
@@ -90,6 +91,9 @@ class ChatBubble extends StatelessWidget {
 
   /// 构建气泡内容
   Widget _buildBubbleContent(BuildContext context) {
+    if (message.type == MessageType.voice) {
+      return VoiceMessage(message: message, isSender: isSender);
+    }
     if (_isSticker) {
       return _buildStickerContent();
     }
@@ -218,13 +222,11 @@ class ChatBubble extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: imagePath.startsWith('http')
-            ? CachedNetworkImage(
-                imageUrl: imagePath,
+        child: (imagePath.startsWith('http') || imagePath.startsWith('/api/'))
+            ? ResourceImage(
+                imagePath,
                 fit: BoxFit.contain,
-                placeholder: (_, __) => _buildStickerPlaceholder(emotion),
-                errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
-                fadeInDuration: const Duration(milliseconds: 150),
+                errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
               )
             : File(imagePath).existsSync()
             ? Image.file(
@@ -359,8 +361,8 @@ class ChatBubble extends StatelessWidget {
         height: 40,
         color: isSender ? const Color(0xFF7EB7E7) : const Color(0xFFE7C77E),
         child: effectiveAvatarUrl != null && effectiveAvatarUrl.isNotEmpty
-            ? (effectiveAvatarUrl.startsWith('http')
-                  ? Image.network(
+            ? ((effectiveAvatarUrl.startsWith('http') || effectiveAvatarUrl.startsWith('/api/'))
+                  ? ResourceImage(
                       effectiveAvatarUrl,
                       width: 40,
                       height: 40,

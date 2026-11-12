@@ -1,5 +1,6 @@
 /// 群聊模型
 class GroupChat {
+  final String? syncVersion;
   final String id;
   final String name;
   final String? avatarUrl;
@@ -23,6 +24,7 @@ class GroupChat {
   final int summaryEveryNRounds;
 
   GroupChat({
+    this.syncVersion,
     required this.id,
     required this.name,
     this.avatarUrl,
@@ -54,6 +56,7 @@ class GroupChat {
     int? summaryEveryNRounds,
   }) {
     return GroupChat(
+      syncVersion: syncVersion,
       id: id ?? this.id,
       name: name ?? this.name,
       avatarUrl: avatarUrl ?? this.avatarUrl,
@@ -106,6 +109,7 @@ class GroupChat {
 
   Map<String, dynamic> toJson() {
     return {
+      if (syncVersion != null) 'sync_version': syncVersion,
       'id': id,
       'name': name,
       'avatar_url': avatarUrl,
@@ -124,11 +128,12 @@ class GroupChat {
 
   factory GroupChat.fromJson(Map<String, dynamic> json) {
     return GroupChat(
+      syncVersion: json['sync_version'] as String?,
       id: json['id'] as String,
       name: json['name'] as String,
       avatarUrl: json['avatar_url'] as String?,
       memberIds: (json['member_ids'] as List<dynamic>).cast<String>(),
-      ownerId: json['owner_id'] as String,
+      ownerId: json['owner_id'] as String? ?? 'user',
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
           : DateTime.now(),

@@ -1,3 +1,4 @@
+from services.resource_service import resource_response, version
 """
 角色管理路由
 """
@@ -5,12 +6,42 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request, Header
+from services import history_service
+from services.sync_service import local_mutation
+from starlette.concurrency import run_in_threadpool
+from services.logging_service import get_logger, reference
+import time
+
+logger = get_logger("sync")
 
 router = APIRouter()
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+
+class RoleApiUpdate(BaseModel):
+    revision: Optional[str] = Field(default=None, max_length=64)
+    api_url: Optional[str] = Field(default=None, max_length=2048)
+    api_key: Optional[str] = Field(default=None, max_length=8192)
+    model: Optional[str] = Field(default=None, max_length=256)
+
+
+@router.get("/roles/{role_id}/chat-api")
+async def get_role_api(role_id: str):
+    if not load_role(role_id):
+        raise HTTPException(404, "角色不存在")
+    from services import role_api_service
+    return role_api_service.read(role_id)
+
+
+@router.put("/roles/{role_id}/chat-api")
+async def put_role_api(role_id: str, update: RoleApiUpdate):
+    if not load_role(role_id):
+        raise HTTPException(404, "角色不存在")
+    from services import role_api_service
+    return role_api_service.save(role_id, update.model_dump())
+
+from services.paths_service import DATA_DIR
 ROLES_DIR = DATA_DIR / "roles"
 
 class ProactiveConfig(BaseModel):
@@ -40,6 +71,7 @@ class RoleCreate(BaseModel):
     # 人设与提示词
     persona: Optional[str] = ""         # 角色人设描述
     system_prompt: Optional[str] = ""   # 系统提示词
+    attached_json_content: Optional[str] = None
     greeting: Optional[str] = ""        # 首次对话问候语
     description: Optional[str] = ""     # 简短描述
     
@@ -59,6 +91,7 @@ class RoleCreate(BaseModel):
     presence_penalty: Optional[float] = None
     max_context_rounds: Optional[int] = None
     allow_web_search: Optional[bool] = None
+    summary_every_n_rounds: int = Field(default=20, ge=1, le=1000)
     
     # 扩展元数据
     tags: Optional[List[str]] = []
@@ -70,6 +103,7 @@ class RoleUpdate(BaseModel):
     avatar_url: Optional[str] = None
     persona: Optional[str] = None
     system_prompt: Optional[str] = None
+    attached_json_content: Optional[str] = None
     greeting: Optional[str] = None
     description: Optional[str] = None
     core_memory: Optional[List[str]] = None
@@ -82,6 +116,7 @@ class RoleUpdate(BaseModel):
     presence_penalty: Optional[float] = None
     max_context_rounds: Optional[int] = None
     allow_web_search: Optional[bool] = None
+    summary_every_n_rounds: Optional[int] = Field(default=None, ge=1, le=1000)
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -92,6 +127,8 @@ class MemoryUpdate(BaseModel):
 
 def get_role_dir(role_id: str) -> Path:
     """获取角色目录，自动创建完整目录结构"""
+    if not role_id.replace("_", "").replace("-", "").isalnum() or len(role_id) > 128:
+        raise HTTPException(422, "无效角色编号")
     role_dir = ROLES_DIR / role_id
     role_dir.mkdir(parents=True, exist_ok=True)
     
@@ -121,17 +158,20 @@ def get_role_dir(role_id: str) -> Path:
     return role_dir
 
 def load_role(role_id: str) -> Optional[Dict]:
-    profile_file = get_role_dir(role_id) / "profile.json"
+    if not role_id.replace("_", "").replace("-", "").isalnum() or len(role_id) > 128:
+        raise HTTPException(422, "无效角色编号")
+    profile_file = ROLES_DIR / role_id / "profile.json"
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            return None if data.get("deleted") else data
     return None
 
 def save_role(role_id: str, data: Dict):
     profile_file = get_role_dir(role_id) / "profile.json"
     data["updated_at"] = datetime.now().isoformat()
-    with open(profile_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    from services.sync_service import write_json
+    write_json(profile_file, data)
 
 @router.get("/roles")
 async def list_roles():
@@ -142,7 +182,9 @@ async def list_roles():
             if role_dir.is_dir():
                 role = load_role(role_dir.name)
                 if role:
-                    roles.append(role)
+                    from services import sync_service
+                    role["sync_version"] = sync_service.version("role", role["id"], ROLES_DIR.parent, role)
+                    roles.append(sync_service.public(role))
     return {"roles": roles}
 
 @router.get("/roles/{role_id}")
@@ -151,25 +193,36 @@ async def get_role(role_id: str):
     role = load_role(role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
-    return role
+    from services.sync_service import public
+    return public(role)
 
 @router.post("/roles")
-async def create_role(role: RoleCreate):
+@local_mutation
+async def create_role(role: RoleCreate, x_base_version: Optional[str] = Header(default=None)):
     """创建或更新角色（upsert）"""
     existing = load_role(role.id)
+    path = ROLES_DIR / role.id / "profile.json"
+    if not existing and path.exists():
+        raise HTTPException(409, "此编号已删除，请在数据同步页处理或新建独立角色")
     
     if existing:
+        from services import sync_service
+        sync_service.check_version("role", role.id, x_base_version, ROLES_DIR.parent, existing)
         # 更新现有角色
-        print(f"[ROLES] Updating existing role: {role.id}")
+        logger.info("", extra={"event": "role_update_started", "role_ref": reference(role.id)})
         for key, value in role.model_dump(exclude_none=True).items():
             if key != 'id' and value is not None:
+                if key == "metadata":
+                    value = {**(existing.get("metadata") or {}), **value}
                 existing[key] = value
         save_role(role.id, existing)
-        print(f"[ROLES] Role updated: {role.id}, core_memory count: {len(existing.get('core_memory', []))}")
+        from services.scheduler_service import schedule_proactive_for_role
+        schedule_proactive_for_role(role.id)
+        logger.info("", extra={"event": "role_updated", "role_ref": reference(role.id)})
         return existing
     
     # 创建新角色
-    print(f"[ROLES] Creating new role: {role.id}")
+    logger.info("", extra={"event": "role_create_started", "role_ref": reference(role.id)})
     data = {
         "id": role.id,
         "name": role.name,
@@ -192,30 +245,45 @@ async def create_role(role: RoleCreate):
         "metadata": role.metadata or {},
         "created_at": datetime.now().isoformat()
     }
+    data.update(role.model_dump(exclude_none=True, exclude={"personality", "proactive_config"}))
     save_role(role.id, data)
-    print(f"[ROLES] Role created: {role.id}")
+    from services.scheduler_service import schedule_proactive_for_role
+    schedule_proactive_for_role(role.id)
+    logger.info("", extra={"event": "role_created", "role_ref": reference(role.id)})
     return data
 
 @router.put("/roles/{role_id}")
-async def update_role(role_id: str, update: RoleUpdate):
+@local_mutation
+async def update_role(role_id: str, update: RoleUpdate, x_base_version: Optional[str] = Header(default=None)):
     """更新角色"""
     role = load_role(role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
-    
+    from services import sync_service
+    sync_service.check_version("role", role_id, x_base_version, ROLES_DIR.parent, role)
     for key, value in update.model_dump(exclude_none=True).items():
+        if key == "metadata":
+            value = {**(role.get("metadata") or {}), **value}
         role[key] = value
     
     save_role(role_id, role)
+    from services.scheduler_service import get_scheduler, schedule_proactive_for_role
+    scheduler = get_scheduler()
+    if scheduler.get_job("proactive_" + role_id):
+        scheduler.remove_job("proactive_" + role_id)
+    schedule_proactive_for_role(role_id)
     return role
 
 @router.delete("/roles/{role_id}")
-async def delete_role(role_id: str):
+@local_mutation
+async def delete_role(role_id: str, x_base_version: Optional[str] = Header(default=None)):
     """删除角色"""
-    role_dir = ROLES_DIR / role_id
-    if role_dir.exists():
-        import shutil
-        shutil.rmtree(role_dir)
+    role = load_role(role_id)
+    if not role:
+        raise HTTPException(404, "角色不存在")
+    from services import sync_service
+    sync_service.check_version("role", role_id, x_base_version, ROLES_DIR.parent, role)
+    save_role(role_id, {**role, "deleted": True})
     return {"success": True}
 
 # ========== 记忆管理 ==========
@@ -229,8 +297,8 @@ def load_memory(role_id: str) -> Dict:
 
 def save_memory(role_id: str, memory: Dict):
     memory_file = get_role_dir(role_id) / "memory.json"
-    with open(memory_file, "w", encoding="utf-8") as f:
-        json.dump(memory, f, indent=2, ensure_ascii=False)
+    from services.sync_service import write_json
+    write_json(memory_file, memory)
 
 @router.get("/roles/{role_id}/memory")
 async def get_memory(role_id: str):
@@ -238,9 +306,12 @@ async def get_memory(role_id: str):
     return load_memory(role_id)
 
 @router.put("/roles/{role_id}/memory")
-async def update_memory(role_id: str, update: MemoryUpdate):
+@local_mutation
+async def update_memory(role_id: str, update: MemoryUpdate, x_base_version: Optional[str] = Header(default=None)):
     """更新角色记忆"""
     memory = load_memory(role_id)
+    from services import sync_service
+    sync_service.check_version("memory", role_id, x_base_version, ROLES_DIR.parent, memory)
     
     if update.core_memory is not None:
         memory["core_memory"] = update.core_memory
@@ -251,6 +322,7 @@ async def update_memory(role_id: str, update: MemoryUpdate):
     return memory
 
 @router.post("/roles/{role_id}/memory/append")
+@local_mutation
 async def append_memory(role_id: str, content: str):
     """追加短期记忆"""
     memory = load_memory(role_id)
@@ -293,8 +365,8 @@ def load_assets_metadata(role_id: str) -> List[Dict]:
 def save_assets_metadata(role_id: str, metadata: List[Dict]):
     """保存素材元数据"""
     meta_file = get_asset_metadata_file(role_id)
-    with open(meta_file, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    from services.sync_service import write_json
+    write_json(meta_file, metadata)
 
 @router.get("/roles/{role_id}/assets")
 async def list_assets(role_id: str):
@@ -316,6 +388,10 @@ async def upload_asset(
     role = load_role(role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
+    if asset_type not in ('sticker', 'image'):
+        raise HTTPException(422, '素材用途无效')
+    from services.upload_service import image
+    content, extension = await image(file)
     
     # 检查文件类型
     ext = Path(file.filename).suffix.lower()
@@ -330,8 +406,7 @@ async def upload_asset(
     assets_dir = get_assets_dir(role_id)
     file_path = assets_dir / filename
     
-    with open(file_path, "wb") as f:
-        content = await file.read()
+    with open(file_path, "xb") as f:
         f.write(content)
     
     # 更新元数据
@@ -350,7 +425,7 @@ async def upload_asset(
     return asset_info
 
 @router.get("/roles/{role_id}/assets/{asset_id}")
-async def get_asset(role_id: str, asset_id: str):
+async def get_asset(role_id: str, asset_id: str, request: Request):
     """获取素材文件"""
     metadata = load_assets_metadata(role_id)
     asset = next((a for a in metadata if a["id"] == asset_id), None)
@@ -362,7 +437,7 @@ async def get_asset(role_id: str, asset_id: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
     
-    return FileResponse(file_path)
+    return resource_response(file_path, request)
 
 @router.delete("/roles/{role_id}/assets/{asset_id}")
 async def delete_asset(role_id: str, asset_id: str):
@@ -394,14 +469,14 @@ async def list_assets_by_type(role_id: str, asset_type: str):
 # ========== 表情包接口 ==========
 
 @router.get("/emojis/{role_id}/{emotion}/{filename}")
-async def get_emoji(role_id: str, emotion: str, filename: str):
+async def get_emoji(role_id: str, emotion: str, filename: str, request: Request):
     """获取角色表情包文件"""
     from fastapi.responses import FileResponse
     from fastapi import HTTPException
     
     emoji_path = ROLES_DIR / role_id / "emojis" / emotion / filename
     if emoji_path.exists() and emoji_path.is_file():
-        return FileResponse(emoji_path)
+        return resource_response(emoji_path, request)
     raise HTTPException(status_code=404, detail="Emoji not found")
 
 @router.get("/roles/{role_id}/emojis/{emotion}/random")
@@ -426,7 +501,7 @@ async def get_random_emoji(role_id: str, emotion: str):
         "found": True,
         "emotion": emotion,
         "filename": chosen.name,
-        "url": f"/api/emojis/{role_id}/{emotion}/{chosen.name}"
+        "url": f"/api/emojis/{role_id}/{emotion}/{chosen.name}?v={version(chosen)}"
     }
 
 # ========== 角色头像上传 ==========
@@ -455,38 +530,55 @@ async def upload_role_avatar_file(role_id: str, file: UploadFile = File(...)):
     role = load_role(role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
+    from services.upload_service import image
+    content, ext = await image(file)
+    role = load_role(role_id)
+    if not role:
+        raise HTTPException(404, '角色已删除，原数据未修改')
     
     role_dir = get_role_dir(role_id)
     
     # 获取文件扩展名
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    avatar_filename = f"avatar.{ext}"
+    avatar_filename = f"avatar_{uuid.uuid4().hex}.{ext}"
     avatar_path = role_dir / "assets" / avatar_filename
     
     # 保存文件
-    with open(avatar_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    avatar_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(avatar_path, "xb") as f:
+        f.write(content)
     
     # 更新角色 avatar_url
     avatar_url = f"/api/roles/{role_id}/avatar/file"
+    avatar_url += f"?v={version(avatar_path)}"
+    role["avatar_file"] = avatar_filename
     role["avatar_url"] = avatar_url
     save_role(role_id, role)
+    from services.scheduler_service import get_scheduler, schedule_proactive_for_role
+    scheduler = get_scheduler()
+    if scheduler.get_job("proactive_" + role_id):
+        scheduler.remove_job("proactive_" + role_id)
+    schedule_proactive_for_role(role_id)
     
     return {"success": True, "avatar_url": avatar_url}
 
 @router.get("/roles/{role_id}/avatar/file")
-async def get_role_avatar_file(role_id: str):
+async def get_role_avatar_file(role_id: str, request: Request):
     """获取角色头像文件"""
     from fastapi.responses import FileResponse
     
     role_dir = get_role_dir(role_id)
     assets_dir = role_dir / "assets"
     
+    role = load_role(role_id)
+    if role and role.get("avatar_file"):
+        avatar_path = assets_dir / Path(role["avatar_file"]).name
+        if avatar_path.is_file():
+            return resource_response(avatar_path, request)
     # 查找头像文件
     for ext in ["jpg", "jpeg", "png", "gif", "webp"]:
         avatar_path = assets_dir / f"avatar.{ext}"
         if avatar_path.exists():
-            return FileResponse(avatar_path)
+            return resource_response(avatar_path, request)
     
     raise HTTPException(status_code=404, detail="Avatar not found")
 
@@ -499,6 +591,8 @@ class ChatMessage(BaseModel):
     sender_id: str
     timestamp: str
     type: Optional[str] = "text"
+    audio_url: Optional[str] = Field(default=None, max_length=256)
+    duration_ms: Optional[int] = Field(default=None, ge=1, le=180000)
     quote_id: Optional[str] = None
     quote_content: Optional[str] = None
 
@@ -507,95 +601,40 @@ class ChatMessagesSync(BaseModel):
     messages: List[ChatMessage]
 
 @router.get("/roles/{role_id}/chats/messages")
-async def get_chat_messages(role_id: str, limit: int = 100, offset: int = 0):
-    """获取角色聊天记录"""
-    role_dir = get_role_dir(role_id)
-    messages_file = role_dir / "chats" / "messages.json"
-    
-    if messages_file.exists():
-        with open(messages_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            all_messages = data.get("messages", [])
-            # 分页返回
-            return {
-                "role_id": role_id,
-                "total": len(all_messages),
-                "messages": all_messages[offset:offset + limit]
-            }
-    return {"role_id": role_id, "total": 0, "messages": []}
+async def get_chat_messages(role_id: str, limit: int = 50, offset: int = 0,
+                            before: Optional[str] = None, after: Optional[int] = None):
+    """Newest page or keyset history; incremental synchronization uses after."""
+    if after is not None and after < 0:
+        raise HTTPException(status_code=422, detail="Invalid synchronization cursor")
+    try:
+        result = await run_in_threadpool(history_service.page,
+            get_role_dir(role_id) / "chats", limit, before, after, offset)
+    except ValueError as error:
+        logger.warning("", extra={"event": "history_page_rejected", "error_type": type(error).__name__})
+        raise HTTPException(status_code=422, detail="Invalid history or page parameters; original retained")
+    logger.info("", extra={"event": "history_page", "role_ref": reference(role_id),
+                         "count": len(result["messages"]), "limit": limit})
+    return {"role_id": role_id, **result}
+
 
 @router.post("/roles/{role_id}/chats/messages")
 async def save_chat_message(role_id: str, message: ChatMessage):
-    """保存单条聊天消息"""
-    role_dir = get_role_dir(role_id)
-    messages_file = role_dir / "chats" / "messages.json"
-    
-    # 读取现有消息
-    if messages_file.exists():
-        with open(messages_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = {"messages": []}
-    
-    # 避免重复添加
-    existing_ids = {m.get("id") for m in data["messages"]}
-    if message.id not in existing_ids:
-        data["messages"].append(message.model_dump())
-    
-    # 保存
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    
+    await run_in_threadpool(history_service.append, get_role_dir(role_id) / "chats",
+                            [message.model_dump()])
     return {"success": True, "message_id": message.id}
+
 
 @router.post("/roles/{role_id}/chats/sync")
 async def sync_chat_messages(role_id: str, sync: ChatMessagesSync):
-    """批量同步聊天消息"""
-    role_dir = get_role_dir(role_id)
-    messages_file = role_dir / "chats" / "messages.json"
-    
-    # 读取现有消息
-    if messages_file.exists():
-        with open(messages_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = {"messages": []}
-    
-    # 合并消息（去重）
-    existing_ids = {m.get("id") for m in data["messages"]}
-    added = 0
-    for msg in sync.messages:
-        if msg.id not in existing_ids:
-            data["messages"].append(msg.model_dump())
-            existing_ids.add(msg.id)
-            added += 1
-    
-    # 按时间排序
-    data["messages"].sort(key=lambda m: m.get("timestamp", ""))
-    
-    # 保存
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    return {"success": True, "added": added, "total": len(data["messages"])}
+    return await run_in_threadpool(history_service.append, get_role_dir(role_id) / "chats",
+                                   [message.model_dump() for message in sync.messages])
+
+
+@router.delete("/roles/{role_id}/chats/messages")
+async def clear_chat_messages(role_id: str):
+    return await run_in_threadpool(history_service.remove, get_role_dir(role_id) / "chats")
+
 
 @router.delete("/roles/{role_id}/chats/messages/{message_id}")
 async def delete_chat_message(role_id: str, message_id: str):
-    """删除单条聊天消息"""
-    role_dir = get_role_dir(role_id)
-    messages_file = role_dir / "chats" / "messages.json"
-    
-    if not messages_file.exists():
-        raise HTTPException(status_code=404, detail="消息文件不存在")
-    
-    with open(messages_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    
-    original_count = len(data.get("messages", []))
-    data["messages"] = [m for m in data.get("messages", []) if m.get("id") != message_id]
-    removed = original_count - len(data["messages"])
-    
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    return {"success": True, "removed": removed, "total": len(data["messages"])}
+    return await run_in_threadpool(history_service.remove, get_role_dir(role_id) / "chats", message_id)

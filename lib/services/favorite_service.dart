@@ -1,11 +1,22 @@
+import 'diagnostics_service.dart';
 import 'package:flutter/foundation.dart';
 import '../models/favorite_collection.dart';
 import '../models/message.dart';
 import 'storage_service.dart';
+import 'entity_sync_service.dart';
+import 'session_service.dart';
+import 'api_service.dart';
 
 /// 收藏服务
 /// 管理收藏合集的增删查改和标签操作
 class FavoriteService extends ChangeNotifier {
+  Future<void> applySynced(List<Map<String, dynamic>> rows, Set<String> pending) async {
+    final keep = _collections.where((c) => pending.contains('favorite:${c.id}')).toList();
+    _collections = rows.where((r) => !pending.contains('favorite:${r['id']}')).map(FavoriteCollection.fromJson).toList()..addAll(keep);
+    _collections.sort((a,b) => b.createdAt.compareTo(a.createdAt));
+    await StorageService.setJsonList(_storageKey, _collections.map((c) => c.toJson()).toList());
+    notifyListeners();
+  }
   static final FavoriteService _instance = FavoriteService._internal();
   factory FavoriteService() => _instance;
   FavoriteService._internal();
@@ -30,18 +41,18 @@ class FavoriteService extends ChangeNotifier {
   /// 初始化
   static Future<void> init() async {
     await instance._loadCollections();
-    debugPrint(
-      'FavoriteService: Loaded ${instance._collections.length} collections',
-    );
+    DiagnosticsService.event('chat', 'loaded');
   }
 
   /// 加载收藏
   Future<void> _loadCollections() async {
+    _collections = [];
     final jsonList = StorageService.getJsonList(_storageKey);
     if (jsonList != null) {
-      _collections = jsonList
-          .map((json) => FavoriteCollection.fromJson(json))
-          .toList();
+      for (final json in jsonList) {
+        try { _collections.add(FavoriteCollection.fromJson(json)); }
+        catch (error) { DiagnosticsService.event('migration', 'favorite_original_retained', error: error); }
+      }
       // 按收藏时间倒序
       _collections.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     }
@@ -51,6 +62,11 @@ class FavoriteService extends ChangeNotifier {
   Future<void> _saveCollections() async {
     final jsonList = _collections.map((c) => c.toJson()).toList();
     await StorageService.setJsonList(_storageKey, jsonList);
+  }
+  Future<void> _sync(FavoriteCollection value) async {
+    if (SessionService.instance.authenticated && !await EntitySyncService.instance.save('favorite', value.id, value.toJson())) {
+      throw StateError('收藏已在其他设备修改，请到数据同步页处理');
+    }
   }
 
   /// 创建收藏合集
@@ -75,7 +91,7 @@ class FavoriteService extends ChangeNotifier {
     }).toList();
 
     final collection = FavoriteCollection(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: ApiService.requestId(),
       chatId: chatId,
       chatName: chatName,
       userName: userName,
@@ -86,21 +102,23 @@ class FavoriteService extends ChangeNotifier {
 
     _collections.insert(0, collection);
     await _saveCollections();
+    await _sync(collection);
     notifyListeners();
 
-    debugPrint(
-      'FavoriteService: Created collection with ${snapshots.length} messages',
-    );
+    DiagnosticsService.event('chat', 'created_collection_with');
     return collection;
   }
 
   /// 删除收藏合集
   Future<void> deleteCollection(String collectionId) async {
+    if (SessionService.instance.authenticated && !await EntitySyncService.instance.save('favorite', collectionId, {}, deleted: true)) {
+      throw StateError('收藏删除冲突，请到数据同步页处理');
+    }
     _collections.removeWhere((c) => c.id == collectionId);
     await _saveCollections();
     notifyListeners();
 
-    debugPrint('FavoriteService: Deleted collection $collectionId');
+    DiagnosticsService.event('chat', 'deleted_collection');
   }
 
   /// 获取指定合集
@@ -131,6 +149,7 @@ class FavoriteService extends ChangeNotifier {
 
     _collections[index] = _collections[index].addTag(tag);
     await _saveCollections();
+    await _sync(_collections[index]);
     notifyListeners();
   }
 
@@ -141,11 +160,13 @@ class FavoriteService extends ChangeNotifier {
 
     _collections[index] = _collections[index].removeTag(tag);
     await _saveCollections();
+    await _sync(_collections[index]);
     notifyListeners();
   }
 
   /// 清空所有收藏
   Future<void> clearAll() async {
+    for (final id in _collections.map((c) => c.id).toList()) { await deleteCollection(id); }
     _collections.clear();
     await _saveCollections();
     notifyListeners();

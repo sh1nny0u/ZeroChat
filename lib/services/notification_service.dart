@@ -1,3 +1,5 @@
+import 'diagnostics_service.dart';
+import 'background_delivery_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:app_badge_plus/app_badge_plus.dart';
@@ -16,6 +18,18 @@ class NotificationService {
 
   /// 当前是否在聊天页面（避免重复通知）
   String? _currentChatId;
+  void Function(String)? onOpenChat;
+  String? pendingChat;
+
+  // Match Android String.hashCode so native and Flutter notifications replace
+  // and cancel the same conversation across process restarts.
+  static int notificationId(String chatId) {
+    var value = 0;
+    for (final unit in chatId.codeUnits) {
+      value = (31 * value + unit) & 0xffffffff;
+    }
+    return value >= 0x80000000 ? value - 0x100000000 : value;
+  }
 
   /// 初始化通知服务
   Future<void> init() async {
@@ -42,6 +56,8 @@ class NotificationService {
       settings,
       onDidReceiveNotificationResponse: _onNotificationTapped,
     );
+    final launch = await _notifications.getNotificationAppLaunchDetails();
+    pendingChat = launch?.notificationResponse?.payload;
 
     _initialized = true;
     debugPrint('NotificationService: Initialized');
@@ -76,8 +92,8 @@ class NotificationService {
         showWhen: true,
         category: AndroidNotificationCategory.message,
         styleInformation: BigTextStyleInformation(
-          message,
-          contentTitle: senderName,
+          '收到新的聊天消息，点击查看',
+          contentTitle: 'ZeroChat 新消息',
           summaryText: '新消息',
         ),
       );
@@ -96,16 +112,20 @@ class NotificationService {
 
       // 使用 chatId 的 hashCode 作为通知 ID（确保同一聊天覆盖之前的通知）
       await _notifications.show(
-        chatId.hashCode,
-        senderName,
-        message.length > 50 ? '${message.substring(0, 50)}...' : message,
+        notificationId(chatId),
+        'ZeroChat 新消息',
+        '收到新的聊天消息，点击查看',
         details,
         payload: chatId,
       );
 
-      debugPrint('NotificationService: Showed notification for $senderName');
+      DiagnosticsService.event('resources', 'showed_notification_for');
     } catch (e) {
-      debugPrint('NotificationService: Error showing notification: $e');
+      DiagnosticsService.event(
+        'resources',
+        'error_showing_notification',
+        error: e,
+      );
     }
   }
 
@@ -120,14 +140,16 @@ class NotificationService {
       } else {
         await AppBadgePlus.updateBadge(0);
       }
-      debugPrint('NotificationService: Badge set to $count');
+      DiagnosticsService.event('resources', 'badge_set_to');
     } catch (e) {
-      debugPrint('NotificationService: Error setting badge: $e');
+      DiagnosticsService.event('resources', 'error_setting_badge', error: e);
     }
   }
 
   /// 清除所有通知
   Future<void> clearAllNotifications() async {
+    pendingChat = null;
+    _currentChatId = null;
     await _notifications.cancelAll();
     await AppBadgePlus.updateBadge(0);
     debugPrint('NotificationService: Cleared all notifications');
@@ -135,17 +157,29 @@ class NotificationService {
 
   /// 清除指定聊天的通知
   Future<void> clearChatNotification(String chatId) async {
-    await _notifications.cancel(chatId.hashCode);
-    debugPrint('NotificationService: Cleared notification for $chatId');
+    await BackgroundDeliveryService.cancelChat(chatId);
+    await _notifications.cancel(notificationId(chatId));
+    DiagnosticsService.event(
+      'resources',
+      'cleared_notification_for',
+      chatId: chatId,
+    );
   }
 
   /// 通知点击回调
   void _onNotificationTapped(NotificationResponse response) {
     final chatId = response.payload;
     if (chatId != null) {
-      debugPrint('NotificationService: Notification tapped for chat $chatId');
-      // TODO: 导航到对应聊天页面
-      // 这需要和 Navigator 集成
+      DiagnosticsService.event(
+        'resources',
+        'notification_tapped_for_chat',
+        chatId: chatId,
+      );
+      if (onOpenChat != null) {
+        onOpenChat!(chatId);
+      } else {
+        pendingChat = chatId;
+      }
     }
   }
 }

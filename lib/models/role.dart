@@ -5,6 +5,7 @@ import 'sticker.dart';
 /// 角色模型
 /// 用于 AI 角色的人设配置和参数设置
 class Role {
+  final String? syncVersion;
   final String id;
   final String name;
   final String description;
@@ -38,6 +39,7 @@ class Role {
   final DateTime updatedAt;
 
   Role({
+    this.syncVersion,
     required this.id,
     required this.name,
     this.description = '',
@@ -74,6 +76,7 @@ class Role {
 
   /// 复制并修改
   Role copyWith({
+    String? syncVersion,
     String? id,
     String? name,
     String? description,
@@ -93,6 +96,7 @@ class Role {
     DateTime? updatedAt,
   }) {
     return Role(
+      syncVersion: syncVersion ?? this.syncVersion,
       id: id ?? this.id,
       name: name ?? this.name,
       description: description ?? this.description,
@@ -149,6 +153,7 @@ class Role {
 
   factory Role.fromJson(Map<String, dynamic> json) {
     return Role(
+      syncVersion: json['sync_version'] as String?,
       id: json['id'] as String,
       name: json['name'] as String,
       description: json['description'] as String? ?? '',
@@ -184,6 +189,7 @@ class Role {
 
   Map<String, dynamic> toJson() {
     return {
+      if (syncVersion != null) 'sync_version': syncVersion,
       'id': id,
       'name': name,
       'description': description,

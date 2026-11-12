@@ -1,0 +1,26 @@
+ZeroChat 2.0.0
+Copyright (c) 2026 sh1nny0u
+
+This modified version is distributed as a whole under the GNU Affero General
+Public License, version 3 only (SPDX-License-Identifier: AGPL-3.0-only).
+See LICENSE for the complete license and disclaimer of warranty.
+
+The original ZeroChat was distributed under the MIT License. Its copyright and
+permission notice are preserved in licenses/MIT-original.txt. This release does
+not revoke or remove the permissions applicable to previously released MIT code.
+
+Project: https://github.com/sh1nny0u/ZeroChat
+Corresponding source for this release:
+https://github.com/sh1nny0u/ZeroChat/tree/V2.0.0.261112
+
+Modified versions served over a network must provide their users a prominent
+offer of access to their corresponding source as required by AGPL section 13.
+Set ZEROCHAT_SOURCE_URL to the publicly accessible source of your deployed
+modified version and update the in-app source link when distributing a fork.
+
+The original project acknowledges KouriChat as a reference:
+https://github.com/KouriChat/KouriChat
+
+Third-party dependencies and build tools retain their own licenses. The Android
+application exposes bundled dependency notices under Settings > About ZeroChat.
+Local embedding model weights are not bundled; their original terms apply.

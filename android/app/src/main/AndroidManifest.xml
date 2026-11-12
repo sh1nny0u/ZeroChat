@@ -6,11 +6,16 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     
     <application
-        android:label="zerochat"
+        android:label="${appLabel}"
         android:name="${applicationName}"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="${allowLanHttp}"
         android:icon="@mipmap/ic_launcher">
+        <service android:name=".DeliveryService" android:exported="false" android:foregroundServiceType="dataSync" android:stopWithTask="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

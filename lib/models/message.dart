@@ -10,6 +10,8 @@ class Message {
   final MessageType type;
   final DateTime timestamp;
   final bool isRead;
+  final String? audioUrl;
+  final int? durationMs;
 
   /// 引用的消息 ID（可为空）
   final String? quotedMessageId;
@@ -25,6 +27,8 @@ class Message {
     this.type = MessageType.text,
     required this.timestamp,
     this.isRead = false,
+    this.audioUrl,
+    this.durationMs,
     this.quotedMessageId,
     this.quotedPreviewText,
   });
@@ -63,8 +67,10 @@ class Message {
         (e) => e.name == json['type'],
         orElse: () => MessageType.text,
       ),
-      timestamp: DateTime.parse(json['timestamp'] as String),
+      timestamp: DateTime.parse(json['timestamp'] as String).toLocal(),
       isRead: json['is_read'] as bool? ?? false,
+      audioUrl: json['audio_url'] as String?,
+      durationMs: (json['duration_ms'] as num?)?.toInt(),
       quotedMessageId: json['quoted_message_id'] as String?,
       quotedPreviewText: json['quoted_preview_text'] as String?,
     );
@@ -77,8 +83,10 @@ class Message {
       'receiver_id': receiverId,
       'content': content,
       'type': type.name,
-      'timestamp': timestamp.toIso8601String(),
+      'timestamp': timestamp.toUtc().toIso8601String(),
       'is_read': isRead,
+      if (audioUrl != null) 'audio_url': audioUrl,
+      if (durationMs != null) 'duration_ms': durationMs,
       'quoted_message_id': quotedMessageId,
       'quoted_preview_text': quotedPreviewText,
     };
@@ -103,6 +111,8 @@ class Message {
     MessageType? type,
     DateTime? timestamp,
     bool? isRead,
+    String? audioUrl,
+    int? durationMs,
     String? quotedMessageId,
     String? quotedPreviewText,
   }) {
@@ -114,6 +124,8 @@ class Message {
       type: type ?? this.type,
       timestamp: timestamp ?? this.timestamp,
       isRead: isRead ?? this.isRead,
+      audioUrl: audioUrl ?? this.audioUrl,
+      durationMs: durationMs ?? this.durationMs,
       quotedMessageId: quotedMessageId ?? this.quotedMessageId,
       quotedPreviewText: quotedPreviewText ?? this.quotedPreviewText,
     );

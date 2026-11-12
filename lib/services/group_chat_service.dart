@@ -1,22 +1,31 @@
-import 'package:flutter/foundation.dart';
+import 'diagnostics_service.dart';
 import '../models/group_chat.dart';
 import 'storage_service.dart';
+import 'backend_sync_service.dart';
+import 'entity_sync_service.dart';
+import 'api_service.dart';
 
 /// 群聊服务
 /// 管理群聊创建、成员、防刷屏等
 class GroupChatService {
+  static Future<void> applySynced(List<Map<String, dynamic>> rows, Set<String> pending) async {
+    final keep = _groups.where((g) => pending.contains('group:${g.id}')).toList();
+    _groups.clear();
+    _groups.addAll(rows.where((r) => !pending.contains('group:${r['id']}')).map(GroupChat.fromJson));
+    _groups.addAll(keep);
+    await _saveGroups();
+  }
   static final List<GroupChat> _groups = [];
-  static final Map<String, DateTime> _lastReplyTime = {};
-  static final Map<String, int> _replyCountPerMinute = {};
 
   /// 初始化
   static Future<void> init() async {
     await _loadGroups();
-    debugPrint('GroupChatService initialized with ${_groups.length} groups');
+    DiagnosticsService.event('chat', 'groupchatservice_initialized_with');
   }
 
   /// 加载群聊列表
   static Future<void> _loadGroups() async {
+    _groups.clear();
     final jsonList = StorageService.getJsonList('group_chats');
     if (jsonList != null) {
       _groups.clear();
@@ -24,7 +33,7 @@ class GroupChatService {
         try {
           _groups.add(GroupChat.fromJson(json));
         } catch (e) {
-          debugPrint('Error loading group: $e');
+          DiagnosticsService.event('chat', 'legacy_event', error: e);
         }
       }
     }
@@ -44,7 +53,7 @@ class GroupChatService {
     int maxRepliesPerMinute = 10,
   }) async {
     final group = GroupChat(
-      id: 'group_${DateTime.now().millisecondsSinceEpoch}',
+      id: 'group_${ApiService.requestId()}',
       name: name,
       memberIds: memberIds,
       ownerId: 'user',
@@ -52,7 +61,8 @@ class GroupChatService {
       maxRepliesPerMinute: maxRepliesPerMinute,
     );
 
-    _groups.add(group);
+    await BackendSyncService.syncGroup(group);
+    _groups.add(GroupChat.fromJson({...group.toJson(), 'sync_version': EntitySyncService.instance.version('group', group.id)}));
     await _saveGroups();
     return group;
   }
@@ -71,13 +81,15 @@ class GroupChatService {
   static Future<void> updateGroup(GroupChat group) async {
     final index = _groups.indexWhere((g) => g.id == group.id);
     if (index != -1) {
-      _groups[index] = group;
+      await BackendSyncService.syncGroup(group);
+      _groups[index] = GroupChat.fromJson({...group.toJson(), 'sync_version': EntitySyncService.instance.version('group', group.id)});
       await _saveGroups();
     }
   }
 
   /// 删除群聊
   static Future<void> deleteGroup(String groupId) async {
+    if (!await EntitySyncService.instance.save('group', groupId, {}, deleted: true)) throw StateError('群聊删除存在冲突');
     _groups.removeWhere((g) => g.id == groupId);
     await _saveGroups();
   }
@@ -111,68 +123,4 @@ class GroupChatService {
     }
   }
 
-  // ========== 防刷屏机制 ==========
-
-  /// 检查 AI 是否可以回复（防止无限循环）
-  static bool canAIReply(String groupId, String roleId) {
-    final group = getGroup(groupId);
-    if (group == null) return false;
-
-    final key = '${groupId}_$roleId';
-    final now = DateTime.now();
-
-    // 检查冷却时间
-    final lastReply = _lastReplyTime[key];
-    if (lastReply != null) {
-      final elapsed = now.difference(lastReply).inSeconds;
-      if (elapsed < group.cooldownSeconds) {
-        debugPrint(
-          'AI $roleId in cooldown: ${group.cooldownSeconds - elapsed}s remaining',
-        );
-        return false;
-      }
-    }
-
-    // 检查每分钟回复数
-    final minuteKey = '${key}_${now.minute}';
-    final count = _replyCountPerMinute[minuteKey] ?? 0;
-    if (count >= group.maxRepliesPerMinute) {
-      debugPrint('AI $roleId exceeded max replies per minute');
-      return false;
-    }
-
-    return true;
-  }
-
-  /// 记录 AI 回复
-  static void recordAIReply(String groupId, String roleId) {
-    final key = '${groupId}_$roleId';
-    final now = DateTime.now();
-
-    _lastReplyTime[key] = now;
-
-    final minuteKey = '${key}_${now.minute}';
-    _replyCountPerMinute[minuteKey] =
-        (_replyCountPerMinute[minuteKey] ?? 0) + 1;
-
-    // 清理旧的计数
-    _replyCountPerMinute.removeWhere((k, _) => !k.contains('_${now.minute}'));
-  }
-
-  /// 选择下一个应该回复的 AI（避免同一个 AI 连续回复）
-  static String? selectNextResponder(String groupId, String lastResponderId) {
-    final group = getGroup(groupId);
-    if (group == null) return null;
-
-    // 过滤掉最后回复的 AI 和不能回复的 AI
-    final candidates = group.memberIds
-        .where((id) => id != lastResponderId && canAIReply(groupId, id))
-        .toList();
-
-    if (candidates.isEmpty) return null;
-
-    // 随机选择一个
-    candidates.shuffle();
-    return candidates.first;
-  }
 }

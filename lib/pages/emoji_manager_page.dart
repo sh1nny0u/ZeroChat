@@ -1,3 +1,4 @@
+import '../widgets/resource_image.dart';
 import 'package:flutter/material.dart';
 
 /// 表情包管理页面
@@ -141,7 +142,7 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
           onLongPress: () => _deleteEmoji(index),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: Image.network(
+            child: ResourceImage(
               emojis[index],
               fit: BoxFit.cover,
               errorBuilder: (_, __, ___) => Container(

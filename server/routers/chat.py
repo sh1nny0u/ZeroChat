@@ -9,19 +9,23 @@ from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 import httpx
+from services.logging_service import get_logger
+
+logger = get_logger("chat")
 
 router = APIRouter()
 
 # 数据目录
-DATA_DIR = Path(__file__).parent.parent / "data"
+from services.paths_service import DATA_DIR
 CHATS_DIR = DATA_DIR / "chats"
-CONFIG_DIR = Path(__file__).parent.parent / "config"
+from services.paths_service import CONFIG_DIR
 
 class ChatMessage(BaseModel):
     role: str  # user / assistant / system
     content: str
 
 class ChatRequest(BaseModel):
+    request_id: str
     chat_id: str
     role_id: str
     message: str
@@ -70,57 +74,11 @@ def get_chat_history(chat_id: str, limit: int = 20) -> List[dict]:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """AI 对话接口"""
-    config = load_config()
-    
-    api_url = config.get("ai_api_url", "")
-    api_key = config.get("ai_api_key", "")
-    model = config.get("ai_model", "gpt-3.5-turbo")
-    
-    if not api_url or not api_key:
-        raise HTTPException(status_code=500, detail="AI API 未配置")
-    
-    # 构建消息列表
-    messages = []
-    if request.system_prompt:
-        messages.append({"role": "system", "content": request.system_prompt})
-    
-    # 添加历史消息
-    if request.history:
-        for msg in request.history:
-            messages.append({"role": msg.role, "content": msg.content})
-    
-    # 添加当前消息
-    messages.append({"role": "user", "content": request.message})
-    
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                api_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.7
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            ai_content = data["choices"][0]["message"]["content"]
-            
-            # 保存消息
-            save_chat_message(request.chat_id, "user", request.message)
-            save_chat_message(request.chat_id, "assistant", ai_content)
-            
-            return ChatResponse(success=True, content=ai_content)
-            
-    except httpx.HTTPError as e:
-        return ChatResponse(success=False, error=str(e))
-    except Exception as e:
-        return ChatResponse(success=False, error=str(e))
+    from routers.ai_behavior import AIEvent
+    from services.event_service import execute
+    result = await execute(AIEvent(request_id=request.request_id, role_id=request.role_id,
+        event_type="chat", content=request.message, context={"chat_id": request.chat_id}))
+    return ChatResponse(success=result.success, content=result.content, error=result.error)
 
 @router.get("/chats/{chat_id}/history")
 async def get_history(chat_id: str, limit: int = 50):
@@ -138,8 +96,8 @@ async def clear_chat(chat_id: str):
 
 
 @router.get("/search")
-async def search_test(q: str):
-    """测试联网搜索（GET /api/search?q=关键词）"""
+async def search(q: str):
+    """按需联网搜索（GET /api/search?q=关键词）"""
     from services.search_service import should_search, web_search, format_search_results
     
     triggered = should_search(q)

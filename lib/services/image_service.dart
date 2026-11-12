@@ -1,5 +1,6 @@
+import 'diagnostics_service.dart';
+import 'storage_service.dart';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
@@ -19,7 +20,7 @@ class ImageService {
   /// 初始化
   static Future<void> init() async {
     final appDir = await getApplicationDocumentsDirectory();
-    instance._imagesDir = '${appDir.path}/images';
+    instance._imagesDir = '${appDir.path}/${StorageService.scopedDirectory('images')}';
 
     // 确保目录存在
     final dir = Directory(instance._imagesDir!);
@@ -27,7 +28,7 @@ class ImageService {
       await dir.create(recursive: true);
     }
 
-    debugPrint('ImageService: Initialized at ${instance._imagesDir}');
+    DiagnosticsService.event('resources', 'initialized_at');
   }
 
   /// 获取图片目录
@@ -47,7 +48,7 @@ class ImageService {
 
       return await _copyToAppDir(image);
     } catch (e) {
-      debugPrint('ImageService: Error picking image: $e');
+      DiagnosticsService.event('resources', 'error_picking_image', error: e);
       return null;
     }
   }
@@ -72,7 +73,11 @@ class ImageService {
 
       return paths;
     } catch (e) {
-      debugPrint('ImageService: Error picking multiple images: $e');
+      DiagnosticsService.event(
+        'resources',
+        'error_picking_multiple_images',
+        error: e,
+      );
       return [];
     }
   }
@@ -89,14 +94,15 @@ class ImageService {
       final destPath = '$_imagesDir/$fileName';
 
       // 复制文件
+      if (await xFile.length() > 9 * 1024 * 1024) throw StateError('图片超过 9 MiB');
       final bytes = await xFile.readAsBytes();
       final destFile = File(destPath);
       await destFile.writeAsBytes(bytes);
 
-      debugPrint('ImageService: Saved image to $destPath');
+      DiagnosticsService.event('resources', 'saved_image_to');
       return destPath;
     } catch (e) {
-      debugPrint('ImageService: Error copying image: $e');
+      DiagnosticsService.event('resources', 'error_copying_image', error: e);
       return null;
     }
   }
@@ -107,18 +113,19 @@ class ImageService {
       final file = File(localPath);
       if (await file.exists()) {
         await file.delete();
-        debugPrint('ImageService: Deleted $localPath');
+        DiagnosticsService.event('resources', 'deleted');
         return true;
       }
       return false;
     } catch (e) {
-      debugPrint('ImageService: Error deleting image: $e');
+      DiagnosticsService.event('resources', 'error_deleting_image', error: e);
       return false;
     }
   }
 
   /// 检查是否是本地路径
   static bool isLocalPath(String path) {
+    if (path.startsWith('/api/')) return false;
     return path.startsWith('/') ||
         path.contains('\\') ||
         path.startsWith('file://');

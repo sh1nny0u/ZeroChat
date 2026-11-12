@@ -6,21 +6,24 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
-from pydantic import BaseModel
-from fastapi import APIRouter
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
+from services.sync_service import local_mutation
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+from services.paths_service import DATA_DIR
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
 
 class MomentCreate(BaseModel):
+    id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
     author_id: str
     author_name: str
     content: str
     image_urls: Optional[List[str]] = []
 
 class CommentCreate(BaseModel):
+    id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
     author_id: str
     author_name: str
     content: str
@@ -35,8 +38,8 @@ def load_moments() -> List[dict]:
 
 def save_moments(moments: List[dict]):
     MOMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(MOMENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(moments, f, indent=2, ensure_ascii=False)
+    from services.sync_service import write_json
+    write_json(MOMENTS_FILE, moments)
 
 @router.get("/moments")
 async def list_moments(limit: int = 50):
@@ -47,12 +50,19 @@ async def list_moments(limit: int = 50):
     return {"moments": moments[:limit]}
 
 @router.post("/moments")
+@local_mutation
 async def create_moment(moment: MomentCreate):
     """发布朋友圈"""
     moments = load_moments()
+    if moment.id:
+        existing = next((m for m in moments if m["id"] == moment.id), None)
+        if existing:
+            if any(existing.get(k) != getattr(moment, k) for k in ("author_id", "content", "image_urls")):
+                raise HTTPException(409, "动态编号冲突")
+            return existing
     
     new_post = {
-        "id": str(uuid.uuid4()),
+        "id": moment.id or str(uuid.uuid4()),
         "author_id": moment.author_id,
         "author_name": moment.author_name,
         "content": moment.content,
@@ -73,9 +83,10 @@ async def get_moment(post_id: str):
     for m in moments:
         if m["id"] == post_id:
             return m
-    return {"error": "not found"}
+    raise HTTPException(404, "动态不存在")
 
 @router.delete("/moments/{post_id}")
+@local_mutation
 async def delete_moment(post_id: str):
     """删除朋友圈"""
     moments = load_moments()
@@ -84,6 +95,7 @@ async def delete_moment(post_id: str):
     return {"success": True}
 
 @router.post("/moments/{post_id}/like")
+@local_mutation
 async def like_moment(post_id: str, user_id: str, user_name: str):
     """点赞"""
     moments = load_moments()
@@ -96,9 +108,10 @@ async def like_moment(post_id: str, user_id: str, user_name: str):
                 })
             save_moments(moments)
             return m
-    return {"error": "not found"}
+    raise HTTPException(404, "动态不存在")
 
 @router.delete("/moments/{post_id}/like/{user_id}")
+@local_mutation
 async def unlike_moment(post_id: str, user_id: str):
     """取消点赞"""
     moments = load_moments()
@@ -107,16 +120,22 @@ async def unlike_moment(post_id: str, user_id: str):
             m["liked_by"] = [l for l in m.get("liked_by", []) if l.get("id") != user_id]
             save_moments(moments)
             return m
-    return {"error": "not found"}
+    raise HTTPException(404, "动态不存在")
 
 @router.post("/moments/{post_id}/comment")
+@local_mutation
 async def add_comment(post_id: str, comment: CommentCreate):
     """添加评论"""
     moments = load_moments()
     for m in moments:
         if m["id"] == post_id:
+            existing = next((c for c in m.get("comments", []) if comment.id and c["id"] == comment.id), None)
+            if existing:
+                if any(existing.get(k) != getattr(comment, k) for k in ("author_id", "content", "reply_to_id")):
+                    raise HTTPException(409, "评论编号冲突")
+                return existing
             new_comment = {
-                "id": str(uuid.uuid4()),
+                "id": comment.id or str(uuid.uuid4()),
                 "author_id": comment.author_id,
                 "author_name": comment.author_name,
                 "content": comment.content,
@@ -127,4 +146,4 @@ async def add_comment(post_id: str, comment: CommentCreate):
             m.setdefault("comments", []).append(new_comment)
             save_moments(moments)
             return new_comment
-    return {"error": "not found"}
+    raise HTTPException(404, "动态不存在")

@@ -1,3 +1,7 @@
+import 'backend_http.dart' as http;
+import 'entity_sync_service.dart';
+import 'session_service.dart';
+import 'diagnostics_service.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -12,6 +16,62 @@ class SettingsService extends ChangeNotifier {
   SettingsService._internal();
 
   static SettingsService get instance => _instance;
+  final Set<String> _dirtyBackendFields = {};
+  String? _settingsScope;
+  Future<void> applySynced(Map<String, dynamic> data) async {
+    for (final key in [
+      'user_nickname',
+      'user_avatar_url',
+      'cover_image_url',
+      'chat_background_url',
+    ]) {
+      await StorageService.setString(
+        key,
+        data[key] as String? ?? (key == 'user_nickname' ? 'ZeroChat' : ''),
+      );
+    }
+    _userNickname = StorageService.getString('user_nickname') ?? 'ZeroChat';
+    _userAvatarUrl = StorageService.getString('user_avatar_url') ?? '';
+    _coverImageUrl = StorageService.getString('cover_image_url') ?? '';
+    _chatBackgroundUrl = StorageService.getString('chat_background_url') ?? '';
+    notifyListeners();
+  }
+
+  Future<void> _syncDisplay(Map<String, dynamic> patch) async {
+    if (!SessionService.instance.authenticated ||
+        EntitySyncService.instance.applying)
+      return;
+    final existing =
+        EntitySyncService.instance.proposals['preferences:global'] as Map?;
+    final pending = Map<String, dynamic>.from(
+      existing?['payload'] as Map? ?? {},
+    );
+    if (!await EntitySyncService.instance.save('preferences', 'global', {
+      ...pending,
+      ...patch,
+    })) {
+      throw StateError('显示设置未保存，请手动重试');
+    }
+  }
+
+  Future<String> _sharedImage(String path) async {
+    if (path.isEmpty ||
+        path.startsWith('/api/') ||
+        path.startsWith('http://') ||
+        path.startsWith('https://') ||
+        !SessionService.instance.authenticated)
+      return path;
+    final file = File(path);
+    if (!await file.exists()) throw StateError('原图片不存在，请重新选择');
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('${SessionService.backend}/api/settings/images'),
+    );
+    request.files.add(await http.MultipartFile.fromPath('file', path));
+    final response = await http.upload(request);
+    if (response.statusCode != 200) throw StateError('图片未保存到服务器，请手动重试');
+    return (jsonDecode(response.body) as Map)['path'] as String;
+  }
 
   // ========== 用户信息 ==========
   String _userNickname = 'ZeroChat';
@@ -29,6 +89,9 @@ class SettingsService extends ChangeNotifier {
   // 主聊天 API
   String _chatApiUrl = '';
   String _chatApiKey = '';
+  bool chatApiConfigured = false,
+      intentApiConfigured = false,
+      visionApiConfigured = false;
   String _chatModel = 'gpt-3.5-turbo';
 
   // 意图识别 API
@@ -83,6 +146,15 @@ class SettingsService extends ChangeNotifier {
 
   /// 初始化
   static Future<void> init() async {
+    final scope =
+        '${StorageService.currentScope}:${StorageService.getString('backend_url')}';
+    if (_instance._settingsScope != scope) {
+      _instance.chatApiConfigured = false;
+      _instance.intentApiConfigured = false;
+      _instance.visionApiConfigured = false;
+      _instance._dirtyBackendFields.clear();
+      _instance._settingsScope = scope;
+    }
     await _instance._loadSettings();
     debugPrint('SettingsService initialized');
   }
@@ -139,9 +211,14 @@ class SettingsService extends ChangeNotifier {
       await StorageService.setString('user_nickname', nickname);
     }
     if (avatarUrl != null) {
+      avatarUrl = await _sharedImage(avatarUrl);
       _userAvatarUrl = avatarUrl;
       await StorageService.setString('user_avatar_url', avatarUrl);
     }
+    await _syncDisplay({
+      if (nickname != null) 'user_nickname': nickname,
+      if (avatarUrl != null) 'user_avatar_url': avatarUrl,
+    });
     notifyListeners();
   }
 
@@ -151,20 +228,30 @@ class SettingsService extends ChangeNotifier {
     String? chatBackgroundUrl,
   }) async {
     if (coverImageUrl != null) {
+      coverImageUrl = await _sharedImage(coverImageUrl);
       _coverImageUrl = coverImageUrl;
       await StorageService.setString('cover_image_url', coverImageUrl);
     }
     if (chatBackgroundUrl != null) {
+      chatBackgroundUrl = await _sharedImage(chatBackgroundUrl);
       _chatBackgroundUrl = chatBackgroundUrl;
       await StorageService.setString('chat_background_url', chatBackgroundUrl);
     }
+    await _syncDisplay({
+      if (coverImageUrl != null) 'cover_image_url': coverImageUrl,
+      if (chatBackgroundUrl != null) 'chat_background_url': chatBackgroundUrl,
+    });
     notifyListeners();
   }
 
   /// 更新消息等待时间
   Future<void> updateMessageWaitSeconds(int seconds) async {
+    _dirtyBackendFields.add('message_wait_seconds');
     _messageWaitSeconds = seconds;
     await StorageService.setInt('message_wait_seconds', seconds);
+    if (SessionService.instance.authenticated &&
+        !await syncApiSettingsToBackend())
+      throw StateError('等待时间未同步，请重试');
     notifyListeners();
   }
 
@@ -174,11 +261,12 @@ class SettingsService extends ChangeNotifier {
     required String key,
     required String model,
   }) async {
+    _dirtyBackendFields.addAll(['ai_api_url', 'ai_api_key', 'ai_model']);
     _chatApiUrl = url;
     _chatApiKey = key;
     _chatModel = model;
     await StorageService.setString('chat_api_url', url);
-    await StorageService.setString('chat_api_key', key);
+
     await StorageService.setString('chat_model', model);
     notifyListeners();
   }
@@ -190,13 +278,19 @@ class SettingsService extends ChangeNotifier {
     required String key,
     required String model,
   }) async {
+    _dirtyBackendFields.addAll([
+      'intent_enabled',
+      'intent_api_url',
+      'intent_api_key',
+      'intent_model',
+    ]);
     _intentEnabled = enabled;
     _intentApiUrl = url;
     _intentApiKey = key;
     _intentModel = model;
     await StorageService.setBool('intent_enabled', enabled);
     await StorageService.setString('intent_api_url', url);
-    await StorageService.setString('intent_api_key', key);
+
     await StorageService.setString('intent_model', model);
 
     // 实时更新 IntentService 配置
@@ -217,24 +311,32 @@ class SettingsService extends ChangeNotifier {
     required String key,
     required String model,
   }) async {
+    _dirtyBackendFields.addAll([
+      'vision_enabled',
+      'vision_api_url',
+      'vision_api_key',
+      'vision_model',
+    ]);
     _visionEnabled = enabled;
     _visionApiUrl = url;
     _visionApiKey = key;
     _visionModel = model;
     await StorageService.setBool('vision_enabled', enabled);
     await StorageService.setString('vision_api_url', url);
-    await StorageService.setString('vision_api_key', key);
+
     await StorageService.setString('vision_model', model);
     notifyListeners();
   }
 
   /// 设置免打扰时间段
   Future<void> setQuietHours(int startHour, int endHour) async {
+    _dirtyBackendFields.addAll(['quiet_start', 'quiet_end']);
     await StorageService.setInt('quiet_start_hour', startHour);
     await StorageService.setInt('quiet_end_hour', endHour);
-    debugPrint(
-      'SettingsService: Quiet hours set to $startHour:00 - $endHour:00',
-    );
+    if (SessionService.instance.authenticated &&
+        !await syncApiSettingsToBackend())
+      throw StateError('免打扰设置未同步，请重试');
+    DiagnosticsService.event('settings', 'quiet_hours_set_to');
     notifyListeners();
   }
 
@@ -265,18 +367,24 @@ class SettingsService extends ChangeNotifier {
     String? memoryPrompt,
   }) async {
     if (basePrompt != null) {
+      _dirtyBackendFields.add('base_prompt');
       _basePrompt = basePrompt;
       await StorageService.setString('base_prompt', basePrompt);
     }
     if (groupPrompt != null) {
+      _dirtyBackendFields.add('group_prompt');
       _groupPrompt = groupPrompt;
       await StorageService.setString('group_prompt', groupPrompt);
     }
     if (memoryPrompt != null) {
+      _dirtyBackendFields.add('memory_prompt');
       _memoryPrompt = memoryPrompt;
       await StorageService.setString('memory_prompt', memoryPrompt);
     }
     notifyListeners();
+    if (SessionService.instance.authenticated &&
+        !await syncApiSettingsToBackend())
+      throw StateError('提示词未同步，请检查后端后重试');
   }
 
   /// 构建完整的系统提示词
@@ -375,32 +483,132 @@ class SettingsService extends ChangeNotifier {
 
   /// 更新后端服务器地址
   Future<void> updateBackendUrl(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        !['http', 'https'].contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      throw ArgumentError('无效服务器地址');
+    }
+    url = url.replaceFirst(RegExp(r'/+$'), '');
+    if (url != _backendUrl) SessionService.instance.invalidate('服务器已切换，请登录');
     _backendUrl = url;
     await StorageService.setString('backend_url', url);
     notifyListeners();
-    debugPrint('SettingsService: Backend URL updated to $url');
+    DiagnosticsService.event('settings', 'backend_url_updated_to');
+  }
+
+  Future<void> loadBackendSettings() async {
+    if (_dirtyBackendFields.isNotEmpty && SessionService.instance.ready) return;
+    final generation = SessionService.instance.generation;
+    final server = _backendUrl;
+    final result = await http.get(Uri.parse('$_backendUrl/api/settings'));
+    if (generation != SessionService.instance.generation ||
+        server != _backendUrl)
+      return;
+    if (result.statusCode != 200) throw StateError('后端设置读取失败');
+    final data = (jsonDecode(result.body) as Map)['settings'] as Map;
+    _chatApiUrl = data['ai_api_url'] as String? ?? '';
+    _chatModel = data['ai_model'] as String? ?? 'gpt-3.5-turbo';
+    _intentEnabled = data['intent_enabled'] == true;
+    _intentApiUrl = data['intent_api_url'] as String? ?? '';
+    _intentModel = data['intent_model'] as String? ?? 'gpt-3.5-turbo';
+    _visionEnabled = data['vision_enabled'] == true;
+    _visionApiUrl = data['vision_api_url'] as String? ?? '';
+    _visionModel = data['vision_model'] as String? ?? 'gpt-4-vision-preview';
+    _chatApiKey = '';
+    _intentApiKey = '';
+    _visionApiKey = '';
+    chatApiConfigured = data['ai_ready'] == true;
+    intentApiConfigured = data['intent_ready'] == true;
+    visionApiConfigured = data['vision_ready'] == true;
+    _basePrompt = data['base_prompt'] as String? ?? _defaultBasePrompt;
+    _groupPrompt = data['group_prompt'] as String? ?? _defaultGroupPrompt;
+    _memoryPrompt = data['memory_prompt'] as String? ?? _defaultMemoryPrompt;
+    _messageWaitSeconds = data['message_wait_seconds'] as int? ?? 0;
+    await StorageService.setInt(
+      'quiet_start_hour',
+      data['quiet_start'] as int? ?? 23,
+    );
+    await StorageService.setBool(StorageService.keyQuietTimeEnabled, data['quiet_enabled'] == true);
+    await StorageService.setInt(StorageService.keyQuietTimeStart, data['quiet_start'] as int? ?? 23);
+    await StorageService.setInt(StorageService.keyQuietTimeEnd, data['quiet_end'] as int? ?? 7);
+    await StorageService.setInt(
+      'quiet_end_hour',
+      data['quiet_end'] as int? ?? 7,
+    );
+    notifyListeners();
+  }
+
+  Future<bool> migrateLegacySettings() async {
+    final result = await http.post(
+      Uri.parse('$_backendUrl/api/settings/migrate'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(_backendValues()),
+    );
+    if (result.statusCode != 200) return false;
+    await _retireLocalKeys();
+    return true;
+  }
+
+  Map<String, dynamic> _backendValues() => {
+    'ai_api_url': _chatApiUrl,
+    if (_chatApiKey.isNotEmpty) 'ai_api_key': _chatApiKey,
+    'ai_model': _chatModel,
+    'intent_enabled': _intentEnabled,
+    'intent_api_url': _intentApiUrl,
+    if (_intentApiKey.isNotEmpty) 'intent_api_key': _intentApiKey,
+    'intent_model': _intentModel,
+    'vision_enabled': _visionEnabled,
+    'vision_api_url': _visionApiUrl,
+    if (_visionApiKey.isNotEmpty) 'vision_api_key': _visionApiKey,
+    'vision_model': _visionModel,
+    'base_prompt': _basePrompt,
+    'group_prompt': _groupPrompt,
+    'memory_prompt': _memoryPrompt,
+    'message_wait_seconds': _messageWaitSeconds,
+    'quiet_start': quietStartHour,
+    'quiet_end': quietEndHour,
+  };
+
+  Future<void> _retireLocalKeys() async {
+    for (final field in ['chat_api_key', 'intent_api_key', 'vision_api_key']) {
+      await StorageService.remove(field);
+      if (StorageService.currentScope == StorageService.legacyScope)
+        await StorageService.prefs.remove(field);
+    }
+    _chatApiKey = '';
+    _intentApiKey = '';
+    _visionApiKey = '';
   }
 
   /// 同步 API 设置到后端
   Future<bool> syncApiSettingsToBackend() async {
     try {
       final uri = Uri.parse('$_backendUrl/api/settings');
-      final request = await HttpClient().putUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(
-        jsonEncode({
-          'ai_api_url': _chatApiUrl,
-          'ai_api_key': _chatApiKey,
-          'ai_model': _chatModel,
-        }),
+      final values = _backendValues();
+      final fields = Set<String>.of(_dirtyBackendFields);
+      final updates = {
+        for (final key in fields)
+          if (values.containsKey(key)) key: values[key],
+      };
+      if (updates.isEmpty) return true;
+      final response = await http.put(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(updates),
       );
-      final response = await request.close();
       if (response.statusCode == 200) {
         debugPrint('SettingsService: API settings synced to backend');
+        await _retireLocalKeys();
+        _dirtyBackendFields.removeAll(fields);
+        await loadBackendSettings();
         return true;
       }
     } catch (e) {
-      debugPrint('SettingsService: Backend sync failed: $e');
+      DiagnosticsService.event('settings', 'backend_sync_failed', error: e);
     }
     return false;
   }

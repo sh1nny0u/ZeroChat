@@ -95,7 +95,7 @@ class _PublishMomentPageState extends State<PublishMomentPage> {
                 // 表情（预留）
                 IconButton(
                   onPressed: () {
-                    // TODO: 表情选择
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请使用系统键盘输入表情')));
                   },
                   icon: const Icon(
                     Icons.emoji_emotions_outlined,
@@ -105,7 +105,7 @@ class _PublishMomentPageState extends State<PublishMomentPage> {
                 // 图片（预留）
                 IconButton(
                   onPressed: () {
-                    // TODO: 图片选择
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('当前朋友圈仅支持文字，图片发布尚未开放')));
                   },
                   icon: const Icon(
                     Icons.image_outlined,
@@ -116,7 +116,7 @@ class _PublishMomentPageState extends State<PublishMomentPage> {
                 // 位置（预留）
                 IconButton(
                   onPressed: () {
-                    // TODO: 位置
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('位置分享尚未开放，不会读取或上传位置')));
                   },
                   icon: const Icon(
                     Icons.location_on_outlined,
@@ -137,10 +137,12 @@ class _PublishMomentPageState extends State<PublishMomentPage> {
 
     setState(() => _isPublishing = true);
 
-    await MomentsService.instance.publishPost(content: content);
-
-    if (mounted) {
-      Navigator.pop(context);
-    }
+    try {
+      await MomentsService.instance.publishPost(content: content);
+      if (mounted) Navigator.pop(context);
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error'),
+        action: SnackBarAction(label: '重试', onPressed: _publish)));
+    } finally { if (mounted) setState(() => _isPublishing = false); }
   }
 }

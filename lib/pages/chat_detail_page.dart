@@ -1,3 +1,4 @@
+import '../services/resource_cache_service.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../models/message.dart';
@@ -9,6 +10,7 @@ import '../core/message_store.dart';
 import '../services/role_service.dart';
 import '../services/favorite_service.dart';
 import '../services/settings_service.dart';
+import '../services/diagnostics_service.dart';
 import 'chat_settings_page.dart';
 import 'group_settings_page.dart';
 
@@ -27,7 +29,7 @@ class QuoteState {
 
 /// 聊天详情页面
 /// 使用 ChatController 架构，支持多选收藏
-class ChatDetailPage extends StatefulWidget {
+class ChatDetailPage extends StatelessWidget {
   final String chatId;
   final String chatName;
   final bool isAI;
@@ -44,12 +46,57 @@ class ChatDetailPage extends StatefulWidget {
   });
 
   @override
-  State<ChatDetailPage> createState() => _ChatDetailPageState();
+  Widget build(BuildContext context) => _ChatDetailContent(
+    key: ValueKey(chatId),
+    chatId: chatId,
+    chatName: chatName,
+    isAI: isAI,
+    isGroup: isGroup,
+    memberIds: memberIds,
+  );
 }
 
-class _ChatDetailPageState extends State<ChatDetailPage> {
+class _ChatDetailContent extends StatefulWidget {
+  final String chatId;
+  final String chatName;
+  final bool isAI;
+  final bool isGroup;
+  final List<String>? memberIds;
+  const _ChatDetailContent({
+    super.key,
+    required this.chatId,
+    required this.chatName,
+    required this.isAI,
+    required this.isGroup,
+    this.memberIds,
+  });
+  @override
+  State<_ChatDetailContent> createState() => _ChatDetailPageState();
+}
+
+class _ChatDetailPageState extends State<_ChatDetailContent> {
   final ScrollController _scrollController = ScrollController();
   bool _showTyping = false;
+  bool _loadingOlder = false;
+  late Stream<List<Message>> _messageStream;
+
+  Future<void> _loadOlder() async {
+    if (_loadingOlder) return;
+    setState(() => _loadingOlder = true);
+    await MessageStore.instance.loadOlder(widget.chatId);
+    if (mounted) setState(() => _loadingOlder = false);
+  }
+
+  void _onScroll() {
+    if (_scrollController.hasClients &&
+        _scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 160 &&
+        MessageStore.instance.hasMore(widget.chatId) &&
+        MessageStore.instance.historyError(widget.chatId) == null) {
+      _loadOlder();
+    }
+  }
+
   late Role _currentRole;
 
   /// 当前引用状态
@@ -64,7 +111,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     super.initState();
 
     _currentRole =
-        RoleService.getRoleById(widget.chatId) ?? RoleService.getCurrentRole();
+        RoleService.getRoleById(widget.chatId) ??
+        Role(id: widget.chatId, name: widget.chatName, systemPrompt: '');
 
     ChatController.instance.registerTypingCallback(
       widget.chatId,
@@ -74,6 +122,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     // 监听设置更新（包括背景图）
     SettingsService.instance.addListener(_onSettingsChanged);
 
+    _messageStream = MessageStore.instance.watchMessages(widget.chatId);
+    _scrollController.addListener(_onScroll);
     _initializeChat();
   }
 
@@ -85,6 +135,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     );
 
     await ChatController.instance.onChatPageEnter(widget.chatId);
+    if (!mounted) return;
+    MessageStore.instance.refreshFromBackend(widget.chatId);
 
     if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -98,6 +150,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     SettingsService.instance.removeListener(_onSettingsChanged);
     ChatController.instance.unregisterTypingCallback(widget.chatId);
     ChatController.instance.onChatPageExit(widget.chatId);
+    MessageStore.instance.releaseHistory(widget.chatId);
     _scrollController.dispose();
     super.dispose();
   }
@@ -114,37 +167,83 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   }
 
   /// 发送消息（支持引用）
-  void _sendMessage(String text) {
+  Future<bool> _confirmResend() async {
+    if (!mounted) return false;
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+            titleTextStyle: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF181818),
+            ),
+            contentTextStyle: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              fontSize: 15,
+              height: 1.5,
+              color: Color(0xFF666666),
+            ),
+            title: const Text('确认重新发送？'),
+            content: const Text(
+              '上次请求已停止等待，后端没有找到回复。但供应商可能已处理并计费。重新发送会发起一次新请求，可能重复计费。是否继续？',
+            ),
+            actions: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFF666666),
+                ),
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('保留原文'),
+              ),
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFF07C160),
+                ),
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('重新发送'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _sendMessage(String text) async {
     if (text.trim().isEmpty) return;
-    if (ChatController.instance.isProcessing(widget.chatId)) return;
+    if (ChatController.instance.isProcessing(widget.chatId))
+      throw StateError('正在处理上一条消息');
 
     if (_quoteState != null) {
-      ChatController.instance.sendUserMessageWithQuote(
+      await ChatController.instance.sendUserMessageWithQuote(
         widget.chatId,
         text,
         _quoteState!.messageId,
         _quoteState!.content,
+        confirmResend: _confirmResend,
       );
-      setState(() => _quoteState = null);
+      if (mounted) setState(() => _quoteState = null);
     } else {
-      ChatController.instance.sendUserMessage(widget.chatId, text);
+      await ChatController.instance.sendUserMessage(
+        widget.chatId,
+        text,
+        confirmResend: _confirmResend,
+      );
     }
 
     _scrollToBottom();
   }
 
   /// 发送图片消息
-  void _sendImageMessage(String imagePath) {
-    if (ChatController.instance.isProcessing(widget.chatId)) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('正在处理消息，请稍后')));
-      return;
-    }
-
-    // 发送图片消息
-    ChatController.instance.sendUserImageMessage(widget.chatId, imagePath);
-
+  Future<void> _sendImageMessage(String imagePath) async {
+    await ChatController.instance.sendUserImageMessage(
+      widget.chatId,
+      imagePath,
+      confirmResend: _confirmResend,
+    );
     _scrollToBottom();
   }
 
@@ -233,7 +332,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
   void _scrollToBottom({bool animate = true}) {
     if (_scrollController.hasClients) {
-      final position = _scrollController.position.maxScrollExtent;
+      const position = 0.0;
       if (animate) {
         _scrollController.animateTo(
           position,
@@ -254,6 +353,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   }
 
   String _formatTime(DateTime time) {
+    time = time.toLocal();
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final messageDay = DateTime(time.year, time.month, time.day);
@@ -284,12 +384,20 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             chatName: widget.chatName,
             currentRole: _currentRole,
             onRoleChanged: () {
+              final role = RoleService.getRoleById(widget.chatId);
+              if (!mounted || role == null) return;
               setState(() {
-                _currentRole = RoleService.getCurrentRole();
+                _currentRole = role;
+                DiagnosticsService.event(
+                  'settings',
+                  'chat_role_callback',
+                  chatId: widget.chatId,
+                  roleId: _currentRole.id,
+                );
               });
             },
             onClearHistory: () {
-              MessageStore.instance.clearMessages(widget.chatId);
+              if (mounted) setState(() {});
             },
           ),
         ),
@@ -299,6 +407,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!widget.isGroup &&
+        widget.isAI &&
+        RoleService.getRoleById(widget.chatId) == null) {
+      return Scaffold(
+        appBar: AppBar(title: Text(widget.chatName)),
+        body: const Center(child: Text('角色不存在，请返回角色列表后重试')),
+      );
+    }
     final backgroundUrl = SettingsService.instance.chatBackgroundUrl;
 
     return Scaffold(
@@ -306,10 +422,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       body: Container(
         decoration: BoxDecoration(
           color: const Color(0xFFEDEDED),
-          image: backgroundUrl.isNotEmpty
+          image: backgroundUrl.isNotEmpty && ResourceCacheService.accessAllowed
               ? DecorationImage(
-                  image: backgroundUrl.startsWith('http')
-                      ? NetworkImage(backgroundUrl) as ImageProvider
+                  image:
+                      (backgroundUrl.startsWith('http') ||
+                          backgroundUrl.startsWith('/api/'))
+                      ? ResourceCacheService.provider(backgroundUrl)
+                            as ImageProvider
                       : FileImage(File(backgroundUrl)),
                   fit: BoxFit.cover,
                 )
@@ -320,10 +439,25 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             // 消息列表
             Expanded(
               child: StreamBuilder<List<Message>>(
-                stream: MessageStore.instance.watchMessages(widget.chatId),
+                stream: _messageStream,
                 builder: (context, snapshot) {
                   final messages = snapshot.data ?? [];
 
+                  if (messages.isEmpty &&
+                      snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (messages.isEmpty &&
+                      MessageStore.instance.historyError(widget.chatId) !=
+                          null) {
+                    return Center(
+                      child: TextButton(
+                        onPressed: () => MessageStore.instance
+                            .refreshFromBackend(widget.chatId),
+                        child: const Text('聊天记录加载失败，点击重试'),
+                      ),
+                    );
+                  }
                   if (messages.isEmpty) {
                     return const Center(
                       child: Text(
@@ -337,18 +471,61 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   }
 
                   WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (!_isMultiSelectMode) _scrollToBottom();
+                    if (!_isMultiSelectMode &&
+                        !_loadingOlder &&
+                        _scrollController.hasClients &&
+                        _scrollController.position.pixels < 80) {
+                      _scrollToBottom();
+                    }
                   });
 
                   return ListView.builder(
                     controller: _scrollController,
+                    reverse: true,
                     padding: const EdgeInsets.symmetric(vertical: 10),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) {
+                    itemCount: messages.length + 1,
+                    itemBuilder: (context, reverseIndex) {
+                      if (reverseIndex == messages.length) {
+                        final error = MessageStore.instance.historyError(
+                          widget.chatId,
+                        );
+                        return Center(
+                          child: _loadingOlder
+                              ? const Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: CircularProgressIndicator(),
+                                )
+                              : TextButton(
+                                  onPressed: error != null
+                                      ? () async {
+                                          await MessageStore.instance
+                                              .refreshFromBackend(
+                                                widget.chatId,
+                                              );
+                                          await _loadOlder();
+                                        }
+                                      : MessageStore.instance.hasMore(
+                                          widget.chatId,
+                                        )
+                                      ? _loadOlder
+                                      : null,
+                                  child: Text(
+                                    error ??
+                                        (MessageStore.instance.hasMore(
+                                              widget.chatId,
+                                            )
+                                            ? '加载更早消息'
+                                            : '没有更早消息'),
+                                  ),
+                                ),
+                        );
+                      }
+                      final index = messages.length - 1 - reverseIndex;
                       final message = messages[index];
                       final showTime = _shouldShowTime(messages, index);
 
                       return Column(
+                        key: ValueKey(message.id),
                         children: [
                           if (showTime)
                             Padding(
@@ -372,6 +549,23 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                               ),
                             ),
                           _buildMessageBubble(message),
+                          if (MessageStore.instance.isOutgoing(
+                            widget.chatId,
+                            message.id,
+                          ))
+                            const Align(
+                              alignment: Alignment.centerRight,
+                              child: Padding(
+                                padding: EdgeInsets.fromLTRB(0, 0, 16, 6),
+                                child: Text(
+                                  '等待服务器确认',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF888888),
+                                  ),
+                                ),
+                              ),
+                            ),
                         ],
                       );
                     },
@@ -386,7 +580,11 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             if (_isMultiSelectMode)
               _buildMultiSelectToolbar()
             else
-              InputBar(onSend: _sendMessage, onImageSend: _sendImageMessage),
+              InputBar(
+                draftKey: widget.chatId,
+                onSend: _sendMessage,
+                onImageSend: _sendImageMessage,
+              ),
           ],
         ),
       ),

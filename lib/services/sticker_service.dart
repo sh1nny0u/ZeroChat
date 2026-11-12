@@ -1,6 +1,7 @@
+import 'diagnostics_service.dart';
+import 'storage_service.dart';
 import 'dart:io';
 import 'dart:math';
-import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/sticker.dart';
 
@@ -12,7 +13,7 @@ class StickerService {
   /// 获取表情包存储目录
   static Future<Directory> getStickerDirectory(String roleId) async {
     final appDir = await getApplicationDocumentsDirectory();
-    final stickerDir = Directory('${appDir.path}/$_stickerDirName/$roleId');
+    final stickerDir = Directory('${appDir.path}/${StorageService.scopedDirectory(_stickerDirName)}/$roleId');
     if (!await stickerDir.exists()) {
       await stickerDir.create(recursive: true);
     }
@@ -29,7 +30,7 @@ class StickerService {
     try {
       final sourceFile = File(sourcePath);
       if (!await sourceFile.exists()) {
-        debugPrint('StickerService: Source file not found: $sourcePath');
+        DiagnosticsService.event('resources', 'source_file_not_found');
         return null;
       }
 
@@ -48,7 +49,11 @@ class StickerService {
         name: name,
       );
     } catch (e) {
-      debugPrint('StickerService: Error importing sticker: $e');
+      DiagnosticsService.event(
+        'resources',
+        'error_importing_sticker',
+        error: e,
+      );
       return null;
     }
   }
@@ -62,7 +67,7 @@ class StickerService {
       }
       return true;
     } catch (e) {
-      debugPrint('StickerService: Error deleting sticker: $e');
+      DiagnosticsService.event('resources', 'error_deleting_sticker', error: e);
       return false;
     }
   }

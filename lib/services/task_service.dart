@@ -1,10 +1,12 @@
-import 'dart:async';
+import 'backend_http.dart' as http;
+import 'api_service.dart';
+import 'session_service.dart';
+import 'diagnostics_service.dart';
 import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
-import '../core/chat_controller.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 
 /// 定时任务类型
 enum TaskType {
@@ -24,6 +26,7 @@ class ScheduledTask {
   final bool isRecurring;
   final String? recurringPattern;
   bool isCompleted;
+  final String? lastStatus;
 
   ScheduledTask({
     required this.id,
@@ -36,6 +39,7 @@ class ScheduledTask {
     this.isRecurring = false,
     this.recurringPattern,
     this.isCompleted = false,
+    this.lastStatus,
   });
 
   factory ScheduledTask.fromJson(Map<String, dynamic> json) {
@@ -53,6 +57,7 @@ class ScheduledTask {
       isRecurring: json['is_recurring'] as bool? ?? false,
       recurringPattern: json['recurring_pattern'] as String?,
       isCompleted: json['is_completed'] as bool? ?? false,
+      lastStatus: json['last_status'] as String?,
     );
   }
 
@@ -68,6 +73,7 @@ class ScheduledTask {
       'is_recurring': isRecurring,
       'recurring_pattern': recurringPattern,
       'is_completed': isCompleted,
+      'last_status': lastStatus,
     };
   }
 }
@@ -75,7 +81,7 @@ class ScheduledTask {
 /// 定时任务服务
 /// 管理定时提醒，支持 AI 风格消息发送
 class TaskService {
-  static final Map<String, Timer> _activeTimers = {};
+  static final changes = ValueNotifier<int>(0);
   static final List<ScheduledTask> _tasks = [];
 
   // 安静时间设置（复用 ProactiveConfig 的逻辑，但保留全局设置作为备用）
@@ -84,34 +90,13 @@ class TaskService {
   static int _quietTimeEnd = 7;
 
   // 安静时间内待发送的任务队列
-  static final List<ScheduledTask> _pendingTasks = [];
 
   /// 初始化任务服务
   static Future<void> init() async {
     await _loadTasks();
     await _loadQuietTime();
-    await _coldStartCompensation();
-    _scheduleAllTasks();
-    _startQuietTimeChecker();
-    debugPrint('TaskService initialized with ${_tasks.length} tasks');
-  }
 
-  /// 冷启动补偿：检查已过期任务并立即执行
-  static Future<void> _coldStartCompensation() async {
-    final now = DateTime.now();
-    final expiredTasks = _tasks
-        .where((t) => !t.isCompleted && t.triggerTime.isBefore(now))
-        .toList();
-
-    for (final task in expiredTasks) {
-      debugPrint('TaskService: Cold-start compensation for task ${task.id}');
-      await _deliverMessageAsAI(task);
-      task.isCompleted = true;
-    }
-
-    if (expiredTasks.isNotEmpty) {
-      await _saveTasks();
-    }
+    DiagnosticsService.event('behavior', 'taskservice_initialized_with');
   }
 
   // ========== 安静时间管理 ==========
@@ -129,24 +114,36 @@ class TaskService {
     int startHour = 23,
     int endHour = 7,
   }) async {
+    final response = await http.put(
+      Uri.parse('${SessionService.backend}/api/settings'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'quiet_enabled': enabled,
+        'quiet_start': startHour,
+        'quiet_end': endHour,
+      }),
+    );
+    if (response.statusCode != 200) throw StateError('安静时段未保存到后端，请重试');
     _quietTimeEnabled = enabled;
     _quietTimeStart = startHour;
     _quietTimeEnd = endHour;
     await StorageService.setBool(StorageService.keyQuietTimeEnabled, enabled);
     await StorageService.setInt(StorageService.keyQuietTimeStart, startHour);
     await StorageService.setInt(StorageService.keyQuietTimeEnd, endHour);
-    debugPrint('Quiet time set: $enabled ($startHour:00 - $endHour:00)');
+    DiagnosticsService.event('behavior', 'legacy_event');
   }
 
   static bool isQuietTime() {
-    if (!_quietTimeEnabled) return false;
+    if (!(StorageService.getBool(StorageService.keyQuietTimeEnabled) ?? _quietTimeEnabled)) return false;
     final now = DateTime.now();
     final hour = now.hour;
 
-    if (_quietTimeStart <= _quietTimeEnd) {
-      return hour >= _quietTimeStart && hour < _quietTimeEnd;
+    final start = StorageService.getInt(StorageService.keyQuietTimeStart) ?? _quietTimeStart;
+    final end = StorageService.getInt(StorageService.keyQuietTimeEnd) ?? _quietTimeEnd;
+    if (start <= end) {
+      return hour >= start && hour < end;
     } else {
-      return hour >= _quietTimeStart || hour < _quietTimeEnd;
+      return hour >= start || hour < end;
     }
   }
 
@@ -158,26 +155,10 @@ class TaskService {
     };
   }
 
-  static void _startQuietTimeChecker() {
-    Timer.periodic(const Duration(minutes: 1), (timer) {
-      if (!isQuietTime() && _pendingTasks.isNotEmpty) {
-        _processPendingTasks();
-      }
-    });
-  }
-
-  static Future<void> _processPendingTasks() async {
-    final tasksToProcess = List<ScheduledTask>.from(_pendingTasks);
-    _pendingTasks.clear();
-
-    for (final task in tasksToProcess) {
-      await _deliverMessageAsAI(task);
-    }
-  }
-
   // ========== 任务管理 ==========
 
   static Future<void> _loadTasks() async {
+    _tasks.clear();
     final jsonList = StorageService.getJsonList(
       StorageService.keyScheduledTasks,
     );
@@ -190,7 +171,7 @@ class TaskService {
             _tasks.add(task);
           }
         } catch (e) {
-          debugPrint('Error loading task: $e');
+          DiagnosticsService.event('behavior', 'legacy_event', error: e);
         }
       }
     }
@@ -202,58 +183,7 @@ class TaskService {
       StorageService.keyScheduledTasks,
       jsonList,
     );
-  }
-
-  static void _scheduleAllTasks() {
-    for (final task in _tasks) {
-      if (!task.isCompleted) {
-        _scheduleTask(task);
-      }
-    }
-  }
-
-  static void _scheduleTask(ScheduledTask task) {
-    final now = DateTime.now();
-    final delay = task.triggerTime.difference(now);
-
-    if (delay.isNegative) {
-      // 已过期，标记完成（冷启动已处理）
-      task.isCompleted = true;
-      _saveTasks();
-      return;
-    }
-
-    _activeTimers[task.id]?.cancel();
-    _activeTimers[task.id] = Timer(delay, () {
-      _triggerTask(task);
-    });
-
-    debugPrint('Task scheduled: ${task.id} in ${delay.inSeconds}s');
-  }
-
-  static Future<void> _triggerTask(ScheduledTask task) async {
-    if (isQuietTime()) {
-      _pendingTasks.add(task);
-      debugPrint('Task deferred due to quiet time: ${task.id}');
-    } else {
-      await _deliverMessageAsAI(task);
-    }
-
-    task.isCompleted = true;
-    _activeTimers.remove(task.id);
-    await _saveTasks();
-  }
-
-  /// 以 AI 角色身份发送提醒消息（通过 ChatController）
-  static Future<void> _deliverMessageAsAI(ScheduledTask task) async {
-    await ChatController.instance.sendScheduledTaskMessage(
-      chatId: task.chatId,
-      roleId: task.roleId,
-      taskContent: task.message,
-      customPrompt: task.aiPrompt,
-    );
-
-    debugPrint('TaskService: Message sent for task ${task.id}');
+    changes.value++;
   }
 
   // ========== 公开 API ==========
@@ -266,8 +196,27 @@ class TaskService {
     required DateTime triggerTime,
     String? aiPrompt,
   }) async {
+    final key = sha256
+        .convert(
+          utf8.encode(
+            jsonEncode([
+              chatId,
+              roleId,
+              message,
+              triggerTime.toIso8601String(),
+              aiPrompt,
+            ]),
+          ),
+        )
+        .toString();
+    final pending = Map<String, String>.from(
+      StorageService.getJson('pending_task_creates') ?? {},
+    );
+    final identity = pending[key] ?? ApiService.requestId();
+    pending[key] = identity;
+    await StorageService.setJson('pending_task_creates', pending);
     final task = ScheduledTask(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: identity,
       chatId: chatId,
       roleId: roleId,
       message: message,
@@ -276,16 +225,16 @@ class TaskService {
       type: TaskType.reminder,
     );
 
-    _tasks.add(task);
-    _scheduleTask(task);
+    if (!await _syncTaskToBackend(task))
+      throw StateError('任务未创建：请检查登录和后端连接后手动重试');
+    if (!_tasks.any((t) => t.id == identity)) _tasks.add(task);
     await _saveTasks();
+    pending.remove(key);
+    await StorageService.setJson('pending_task_creates', pending);
 
     // 自动同步到后端
-    await _syncTaskToBackend(task);
 
-    debugPrint(
-      'TaskService: Reminder added for ${triggerTime.toIso8601String()} (synced to backend)',
-    );
+    DiagnosticsService.event('behavior', 'reminder_added_for');
     return task;
   }
 
@@ -323,18 +272,16 @@ class TaskService {
 
   /// 取消任务
   static Future<void> cancelTask(String taskId) async {
-    _activeTimers[taskId]?.cancel();
-    _activeTimers.remove(taskId);
+    await ApiService.requestDelete('/api/tasks/$taskId');
     _tasks.removeWhere((t) => t.id == taskId);
     await _saveTasks();
   }
 
   /// 取消所有任务
   static Future<void> cancelAllTasks() async {
-    for (final timer in _activeTimers.values) {
-      timer.cancel();
+    for (final task in List<ScheduledTask>.from(_tasks)) {
+      await ApiService.requestDelete('/api/tasks/${task.id}');
     }
-    _activeTimers.clear();
     _tasks.clear();
     await _saveTasks();
   }
@@ -346,7 +293,19 @@ class TaskService {
 
   /// 获取指定聊天的任务
   static List<ScheduledTask> getTasksForChat(String chatId) {
-    return _tasks.where((t) => t.chatId == chatId && !t.isCompleted).toList();
+    return _tasks
+        .where(
+          (t) =>
+              t.chatId == chatId &&
+              (!t.isCompleted ||
+                  ['failed', 'uncertain'].contains(t.lastStatus)),
+        )
+        .toList();
+  }
+
+  static Future<void> retryTask(String taskId) async {
+    await ApiService.request('/api/tasks/$taskId/retry', {});
+    await fetchFromBackend();
   }
 
   // ========== 后端同步 ==========
@@ -358,11 +317,12 @@ class TaskService {
   static Future<bool> _syncTaskToBackend(ScheduledTask task) async {
     try {
       final uri = Uri.parse('$_backendUrl/api/tasks');
-      final request = await HttpClient().postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(
-        jsonEncode({
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
           'id': task.id,
+          'chat_id': task.chatId,
           'role_id': task.roleId,
           'trigger_time': task.triggerTime.toIso8601String(),
           'message': task.message,
@@ -370,32 +330,51 @@ class TaskService {
           'enabled': !task.isCompleted,
         }),
       );
-      final response = await request.close();
       return response.statusCode == 200 || response.statusCode == 201;
     } catch (e) {
-      debugPrint('TaskService: Backend sync failed: $e');
+      DiagnosticsService.event('behavior', 'backend_sync_failed', error: e);
       return false;
+    }
+  }
+
+  static Future<void> migrateLocalTasks() async {
+    for (final task in List<ScheduledTask>.from(_tasks)) {
+      if (!task.isCompleted && !await _syncTaskToBackend(task))
+        throw StateError('原定时任务未迁移，请恢复连接后重新登录');
     }
   }
 
   /// 从后端拉取任务
   static Future<bool> fetchFromBackend() async {
+    final generation = SessionService.instance.generation;
     try {
       final uri = Uri.parse('$_backendUrl/api/tasks');
-      final request = await HttpClient().getUrl(uri);
-      final response = await request.close();
+      final response = await http.get(uri);
+      if (generation != SessionService.instance.generation) return false;
       if (response.statusCode == 200) {
-        final body = await response.transform(const Utf8Decoder()).join();
+        final body = response.body;
         final data = jsonDecode(body);
         if (data['tasks'] != null) {
-          debugPrint(
-            'TaskService: Fetched ${(data['tasks'] as List).length} tasks from backend',
-          );
+          _tasks.clear();
+          for (final row in data['tasks'] as List) {
+            _tasks.add(
+              ScheduledTask.fromJson({
+                ...Map<String, dynamic>.from(row as Map),
+                'is_completed': row['enabled'] == false,
+              }),
+            );
+          }
+          await _saveTasks();
+          DiagnosticsService.event('behavior', 'fetched');
           return true;
         }
       }
     } catch (e) {
-      debugPrint('TaskService: Fetch from backend failed: $e');
+      DiagnosticsService.event(
+        'behavior',
+        'fetch_from_backend_failed',
+        error: e,
+      );
     }
     return false;
   }

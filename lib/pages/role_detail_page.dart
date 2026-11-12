@@ -1,15 +1,21 @@
+import '../services/session_service.dart';
+import '../widgets/resource_image.dart';
+import '../services/diagnostics_service.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
+import '../services/backend_http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/memory_service.dart';
+import '../services/entity_sync_service.dart';
 import '../services/chat_list_service.dart';
 import '../services/settings_service.dart';
 import 'role_settings_page.dart';
 import 'chat_detail_page.dart';
+import 'role_api_page.dart';
+import 'role_share_page.dart';
 
 /// 角色详情页面
 /// 查看和编辑角色信息，开始聊天
@@ -69,6 +75,10 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
           const SizedBox(height: 10),
 
           // 角色设置项
+          ListTile(tileColor: Colors.white, title: const Text('角色聊天 API'), trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => RoleApiPage(roleId: _role.id)))),
+          ListTile(tileColor: Colors.white, title: const Text('分享角色好友码'), trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => RoleSharePage(roleId: _role.id)))),
           _buildSection([
             _buildInfoItem('系统提示词', _role.systemPrompt, onTap: _editRole),
             _buildDivider(),
@@ -156,7 +166,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
     if (_role.avatarUrl != null && _role.avatarUrl!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.network(
+        child: ResourceImage(
           _role.avatarUrl!,
           width: size,
           height: size,
@@ -266,6 +276,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
   }
 
   void _changeAvatar() async {
+    final generation = SessionService.instance.generation;
     final picker = ImagePicker();
 
     // 弹出选择对话框
@@ -301,7 +312,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
         imageQuality: 85,
       );
 
-      if (pickedFile == null) return;
+      if (pickedFile == null || !mounted || generation != SessionService.instance.generation) return;
 
       // 显示上传中
       if (!mounted) return;
@@ -340,16 +351,16 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
         ),
       );
 
-      final response = await request.send();
+      final response = await http.upload(request);
       if (response.statusCode == 200) {
-        final respStr = await response.stream.bytesToString();
+        final respStr = response.body;
         final data = jsonDecode(respStr);
         final avatarUrl = data['avatar_url'] as String?;
 
         if (avatarUrl != null) {
-          final fullUrl = '$backendUrl$avatarUrl';
-          final updatedRole = _role.copyWith(avatarUrl: fullUrl);
-          await RoleService.updateRole(updatedRole);
+          await EntitySyncService.instance.pull();
+          final updatedRole = RoleService.getRoleById(_role.id);
+          if (updatedRole == null) throw StateError('目标角色已删除');
           if (!mounted) return;
           setState(() => _role = updatedRole);
           ScaffoldMessenger.of(
@@ -363,7 +374,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
         ).showSnackBar(SnackBar(content: Text('上传失败: ${response.statusCode}')));
       }
     } catch (e) {
-      debugPrint('Avatar upload error: $e');
+      DiagnosticsService.event('sync', 'legacy_event', error: e);
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
@@ -397,10 +408,14 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       MaterialPageRoute(builder: (context) => RoleSettingsPage(role: _role)),
     );
     if (result != null) {
-      await RoleService.updateRole(result);
-      setState(() {
-        _role = result;
-      });
+      try {
+        await RoleService.updateRole(result);
+        if (!mounted) return;
+        setState(() { _role = RoleService.getRoleById(result.id) ?? result; });
+      } catch (_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存未完成，请到设置 → 数据同步与备份处理冲突或重试')));
+      }
     }
   }
 
@@ -409,7 +424,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除角色'),
-        content: Text('确定要删除"${_role.name}"吗？此操作不可恢复。'),
+        content: Text('确定要删除"${_role.name}"吗？将同步到其他设备，服务器保留保护副本。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
